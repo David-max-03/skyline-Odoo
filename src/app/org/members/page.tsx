@@ -3,6 +3,8 @@
 import { useSearchParams } from "next/navigation";
 import { Banknote, Check, Search, UserPlus, Users } from "lucide-react";
 import { Suspense, useMemo, useState, type FormEvent } from "react";
+import { ApplicationsPanel, SetupLinkButton } from "@/components/applications-panel";
+import { OnlinePaymentsPanel } from "@/components/online-payments-panel";
 import { MEMBER_STATUS_LABELS, MemberStatusBadge, Money, OrderStatusBadge, PaymentBadge } from "@/components/domain";
 import { Dialog, DialogActions, useToast } from "@/components/overlay";
 import { useCan } from "@/components/session";
@@ -19,6 +21,7 @@ import {
   Segmented,
   SelectField,
   Table,
+  TableSkeleton,
   Td,
   TextField,
   Th,
@@ -88,6 +91,9 @@ function MembersList() {
         }
       />
 
+      {canManage && <ApplicationsPanel onMemberCreated={reload} />}
+      {canManage && <OnlinePaymentsPanel onMemberCreated={reload} />}
+
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <Segmented
           label="Filter members"
@@ -101,7 +107,7 @@ function MembersList() {
             type="search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, email or number"
+            placeholder="Search members"
             aria-label="Search members"
             className="h-10 w-full rounded-control border border-line-strong bg-surface pl-9 pr-3 text-sm text-ink placeholder:text-subtle focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25"
           />
@@ -112,15 +118,15 @@ function MembersList() {
         {error && !data ? (
           <ErrorState message={error.message} onRetry={reload} />
         ) : !data ? (
-          <LoadingBlock label="Loading members" rows={6} />
+          <TableSkeleton label="Loading members" rows={6} />
         ) : visible.length === 0 ? (
           <EmptyState
             icon={Users}
             title={data.length === 0 ? "No members yet" : "No members match"}
-            description={data.length === 0 ? "Add the first member, or share the public Join page." : "Try a different filter or search."}
+            description={data.length === 0 ? "Add the first member, or share the public Join page so people can apply." : "Try a different filter or search."}
           />
         ) : (
-          <Table>
+          <Table stack>
             <thead>
               <tr>
                 <Th>Member</Th>
@@ -128,35 +134,61 @@ function MembersList() {
                 <Th>Status</Th>
                 <Th>Paid until</Th>
                 <Th align="right">Dues owed</Th>
-                <Th />
+                <Th>
+                  <span className="sr-only">Actions</span>
+                </Th>
               </tr>
             </thead>
             <tbody>
               {visible.map((m) => (
-                <tr key={m.id} className="hover:bg-sunken/50">
-                  <Td>
-                    <button type="button" onClick={() => setViewing(m.id)} className="rounded text-left font-medium text-ink hover:text-brand hover:underline">
-                      {m.name}
-                    </button>
-                    <div className="text-[0.8125rem] text-muted">{m.email}</div>
+                <tr key={m.id} className="transition-colors hover:bg-sunken/50">
+                  <Td layout="lead">
+                    <div className="flex items-center gap-3">
+                      <span
+                        aria-hidden
+                        className="flex size-9 shrink-0 items-center justify-center rounded-full bg-brand-soft text-xs font-bold text-brand-deep"
+                      >
+                        {m.name
+                          .split(" ")
+                          .map((part) => part[0])
+                          .slice(0, 2)
+                          .join("")
+                          .toUpperCase()}
+                      </span>
+                      <div className="min-w-0">
+                        <button type="button" onClick={() => setViewing(m.id)} className="rounded text-left font-medium text-ink hover:text-brand hover:underline">
+                          {m.name}
+                        </button>
+                        <div className="truncate text-[0.8125rem] text-muted">{m.email}</div>
+                      </div>
+                    </div>
                   </Td>
-                  <Td className="font-mono text-[0.8125rem]">{m.memberNo}</Td>
-                  <Td>
+                  <Td label="Number" className="font-mono text-[0.8125rem]">
+                    {m.memberNo}
+                  </Td>
+                  <Td label="Status">
                     <MemberStatusBadge status={m.status} />
                   </Td>
-                  <Td>
+                  <Td label="Paid until">
                     {m.paidUntilOn ? (
-                      <>
+                      <div>
                         {formatDate(m.paidUntilOn)}
                         {m.status === "expiring" && <div className="text-xs text-warn">in {m.daysToExpiry} days</div>}
                         {m.status === "lapsed" && <div className="text-xs text-bad">{Math.abs(m.daysToExpiry ?? 0)} days ago</div>}
-                      </>
+                      </div>
                     ) : (
                       <span className="text-subtle">Never paid</span>
                     )}
                   </Td>
-                  <Td align="right">{m.duesOwedCents > 0 ? <Money cents={m.duesOwedCents} className="font-medium text-ink" /> : <span className="text-subtle">—</span>}</Td>
-                  <Td>
+                  <Td label="Dues owed" align="right">
+                    {m.duesOwedCents > 0 ? <Money cents={m.duesOwedCents} className="font-medium text-ink" /> : (
+                      <span className="text-subtle">
+                        <span aria-hidden className="max-sm:hidden">—</span>
+                        <span className="sm:sr-only">Nothing</span>
+                      </span>
+                    )}
+                  </Td>
+                  <Td layout="actions">
                     {canManage && (
                       <div className="flex justify-end gap-1">
                         {m.duesOwedCents > 0 ? (
@@ -194,7 +226,7 @@ function MembersList() {
       </Dialog>
 
       <Dialog open={viewing !== null} onClose={() => setViewing(null)} title="Member record" size="lg">
-        {viewing && <MemberRecord id={viewing} />}
+        {viewing && <MemberRecord id={viewing} canManage={canManage} />}
       </Dialog>
     </>
   );
@@ -263,7 +295,7 @@ function AddMemberForm({ onSaved, onCancel }: { onSaved: (member: Member) => voi
   );
 }
 
-function MemberRecord({ id }: { id: string }) {
+function MemberRecord({ id, canManage }: { id: string; canManage: boolean }) {
   const { data: m, error, reload } = useApi<MemberDetail>(`/api/members/${id}`);
   if (error && !m) return <ErrorState message={error.message} onRetry={reload} />;
   if (!m) return <LoadingBlock label="Loading member" />;
@@ -282,6 +314,18 @@ function MemberRecord({ id }: { id: string }) {
         </div>
         <MemberStatusBadge status={m.status} />
       </div>
+
+      <section aria-labelledby="member-account" className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-line px-3 py-2.5">
+        <div>
+          <h3 id="member-account" className="text-[0.9375rem] font-semibold">
+            Member account
+          </h3>
+          <p className="text-muted">
+            {m.hasAccount ? "Has set a password and can sign in." : "No password set yet. Send a setup link so they can sign in."}
+          </p>
+        </div>
+        {canManage && <SetupLinkButton memberId={m.id} hasAccount={m.hasAccount} />}
+      </section>
 
       <section aria-labelledby="terms">
         <h3 id="terms" className="mb-2 text-[0.9375rem] font-semibold">

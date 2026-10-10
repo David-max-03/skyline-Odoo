@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 /**
- * Sends visitors without a session cookie from /org/* to the sign-in page.
+ * Sends visitors without a session cookie from /org/* and /member/* to the sign-in page.
  *
  * This is a convenience redirect only. It does not validate the cookie and is
  * not the security boundary: every API route checks the session and role on
@@ -14,4 +14,4 @@ export function proxy(request: NextRequest) {
   return NextResponse.redirect(login);
 }
 
-export const config = { matcher: ["/org/:path*"] };
+export const config = { matcher: ["/org/:path*", "/member/:path*"] };

@@ -10,7 +10,9 @@ import clsx, { type ClassValue } from "clsx";
 import Link from "next/link";
 import { CircleAlert, Inbox, LoaderCircle, RefreshCw, type LucideIcon } from "lucide-react";
 import {
+  useEffect,
   useId,
+  useRef,
   type ButtonHTMLAttributes,
   type ComponentProps,
   type InputHTMLAttributes,
@@ -27,7 +29,7 @@ type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 type ButtonSize = "sm" | "md" | "lg";
 
 const BUTTON_BASE =
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-control font-medium transition-colors duration-150 disabled:opacity-55 disabled:pointer-events-none select-none";
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-control font-medium transition-[background-color,border-color,color,transform] duration-150 active:scale-[0.98] disabled:opacity-55 disabled:pointer-events-none select-none";
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   primary: "bg-brand text-on-brand hover:bg-brand-strong active:bg-brand-deep",
@@ -122,8 +124,8 @@ export function CardHeader({
   action?: ReactNode;
 }) {
   return (
-    <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-line px-5 py-4">
-      <div className="min-w-0">
+    <header className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
+      <div className="min-w-0 flex-1">
         <h2 className="text-[0.9375rem] font-semibold">{title}</h2>
         {description && <p className="mt-0.5 text-[0.8125rem] text-muted">{description}</p>}
       </div>
@@ -154,7 +156,7 @@ export function PageHeader({
         <h1 className="text-2xl font-bold sm:text-[1.7rem]">{title}</h1>
         {description && <p className="mt-1 max-w-2xl text-sm text-muted">{description}</p>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2 max-sm:w-full">{actions}</div>}
     </header>
   );
 }
@@ -185,7 +187,8 @@ export function Badge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium",
+        // Font and tracking are set explicitly so a badge inside a heading does not inherit the display face.
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 font-sans text-xs font-medium tracking-normal",
         TONES[tone],
         className,
       )}
@@ -323,6 +326,35 @@ export function TextAreaField({
   );
 }
 
+/** A photo picker. The server checks the real file type and size; `accept` only guides the chooser. */
+export function FileField({
+  label,
+  error,
+  hint,
+  optional,
+  className,
+  onFile,
+  accept = "image/jpeg,image/png,image/webp",
+}: FieldShell & { onFile: (file: File | null) => void; accept?: string }) {
+  const id = useId();
+  return (
+    <FieldFrame id={id} label={label} error={error} hint={hint} optional={optional} className={className}>
+      <input
+        id={id}
+        type="file"
+        accept={accept}
+        onChange={(event) => onFile(event.target.files?.[0] ?? null)}
+        className={cn(
+          CONTROL,
+          "h-auto py-2 file:mr-3 file:cursor-pointer file:rounded-control file:border-0 file:bg-brand-soft file:px-3 file:py-1.5 file:text-[0.8125rem] file:font-medium file:text-brand-deep",
+        )}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={describedBy(id, error, hint)}
+      />
+    </FieldFrame>
+  );
+}
+
 export function CheckboxField({
   label,
   hint,
@@ -356,7 +388,7 @@ export function FormError({ message }: { message: string | null }) {
 // --- States ---------------------------------------------------------------------
 
 export function Skeleton({ className }: { className?: string }) {
-  return <div className={cn("animate-pulse rounded-control bg-line/70", className)} aria-hidden />;
+  return <div className={cn("skeleton", className)} aria-hidden />;
 }
 
 export function LoadingBlock({ label = "Loading", rows = 4 }: { label?: string; rows?: number }) {
@@ -365,6 +397,43 @@ export function LoadingBlock({ label = "Loading", rows = 4 }: { label?: string; 
       <span className="sr-only">{label}…</span>
       {Array.from({ length: rows }, (_, i) => (
         <Skeleton key={i} className={cn("h-9", i % 3 === 2 ? "w-2/3" : "w-full")} />
+      ))}
+    </div>
+  );
+}
+
+/** Placeholder shaped like the table that is about to appear. */
+export function TableSkeleton({ rows = 5, label = "Loading" }: { rows?: number; label?: string }) {
+  return (
+    <div role="status" aria-live="polite">
+      <span className="sr-only">{label}…</span>
+      <div className="hidden border-b border-line bg-sunken/60 px-5 py-3 sm:block">
+        <Skeleton className="h-3 w-40" />
+      </div>
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className="flex items-center gap-4 border-b border-line px-5 py-4 last:border-0">
+          <div className="min-w-0 flex-1 space-y-2">
+            <Skeleton className={cn("h-3.5", i % 2 ? "w-2/5" : "w-3/5")} />
+            <Skeleton className="h-3 w-1/4" />
+          </div>
+          <Skeleton className="hidden h-6 w-20 rounded-full sm:block" />
+          <Skeleton className="h-4 w-16" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Placeholder for a row of stat tiles. */
+export function StatSkeleton({ count = 4 }: { count?: number }) {
+  return (
+    <div role="status" aria-label="Loading figures" className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i} className="rounded-card border border-line bg-surface p-4 shadow-card">
+          <Skeleton className="h-3 w-24" />
+          <Skeleton className="mt-4 h-7 w-28" />
+          <Skeleton className="mt-3 h-3 w-36" />
+        </div>
       ))}
     </div>
   );
@@ -383,7 +452,7 @@ export function EmptyState({
 }) {
   return (
     <div className="flex flex-col items-center px-6 py-12 text-center">
-      <span className="mb-3 flex size-11 items-center justify-center rounded-full bg-sunken text-muted">
+      <span className="mb-3 flex size-12 items-center justify-center rounded-full bg-sunken text-muted ring-8 ring-sunken/50">
         <Icon className="size-5" aria-hidden />
       </span>
       <h3 className="text-[0.9375rem] font-semibold">{title}</h3>
@@ -452,17 +521,17 @@ export function Stat({
   tone?: Tone;
 }) {
   return (
-    <div className="rounded-card border border-line bg-surface p-4 shadow-card">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-[0.8125rem] font-medium text-muted">{label}</p>
+    <div className="rounded-card border border-line bg-surface p-4 shadow-card sm:p-5">
+      <div className="flex items-center gap-2.5">
         {Icon && (
-          <span className={cn("flex size-7 items-center justify-center rounded-md", TONES[tone])}>
+          <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg", TONES[tone])}>
             <Icon className="size-4" aria-hidden />
           </span>
         )}
+        <p className="text-[0.8125rem] font-medium text-muted">{label}</p>
       </div>
-      <p className="num mt-2 font-display text-2xl font-bold tracking-tight text-ink">{value}</p>
-      {detail && <p className="mt-1 text-[0.8125rem] text-muted">{detail}</p>}
+      <p className="num mt-3 font-display text-[1.75rem] font-bold leading-none tracking-tight text-ink">{value}</p>
+      {detail && <div className="mt-2 text-[0.8125rem] leading-snug text-muted">{detail}</div>}
     </div>
   );
 }
@@ -473,11 +542,13 @@ export function Meter({
   max,
   label,
   tone = "brand",
+  size = "sm",
 }: {
   value: number;
   max: number;
   label: string;
   tone?: "brand" | "ok" | "warn" | "bad";
+  size?: "sm" | "md";
 }) {
   const ratio = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0;
   const fill = { brand: "bg-brand", ok: "bg-ok", warn: "bg-accent", bad: "bg-bad" }[tone];
@@ -488,18 +559,57 @@ export function Meter({
       aria-valuemin={0}
       aria-valuemax={max}
       aria-valuenow={value}
-      className="h-1.5 w-full overflow-hidden rounded-full bg-line"
+      className={cn("w-full overflow-hidden rounded-full bg-line", size === "md" ? "h-2.5" : "h-1.5")}
     >
       <div className={cn("h-full rounded-full transition-[width] duration-300", fill)} style={{ width: `${ratio * 100}%` }} />
     </div>
   );
 }
 
-/** Horizontally scrollable table shell with consistent cell rhythm. */
-export function Table({ children, className }: { children: ReactNode; className?: string }) {
+/**
+ * Table shell with consistent cell rhythm.
+ *
+ * By default it scrolls sideways when it does not fit. With `stack`, each row
+ * becomes a card on phones instead; give every <Td> a `label` (its column
+ * name) and mark the title cell `layout="lead"` so the card reads well.
+ */
+export function Table({
+  children,
+  className,
+  stack = false,
+}: {
+  children: ReactNode;
+  className?: string;
+  stack?: boolean;
+}) {
+  const ref = useRef<HTMLTableElement>(null);
+
+  // Stacking changes the CSS display of the table and its rows, and some
+  // screen readers then stop treating it as a table. Explicit ARIA roles keep
+  // row and column navigation working. Rows are written as plain <tr> in
+  // pages, so the roles are applied here and kept in step as rows change.
+  useEffect(() => {
+    const table = ref.current;
+    if (!stack || !table) return;
+    const apply = () => {
+      table.querySelectorAll("thead, tbody, tfoot").forEach((el) => el.setAttribute("role", "rowgroup"));
+      table.querySelectorAll("tr").forEach((el) => el.setAttribute("role", "row"));
+    };
+    apply();
+    const observer = new MutationObserver(apply);
+    observer.observe(table, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [stack]);
+
   return (
-    <div className="overflow-x-auto">
-      <table className={cn("w-full min-w-[36rem] border-collapse text-left text-sm", className)}>{children}</table>
+    <div className={stack ? "sm:overflow-x-auto" : "overflow-x-auto"}>
+      <table
+        ref={ref}
+        role={stack ? "table" : undefined}
+        className={cn("w-full min-w-[36rem] border-collapse text-left text-sm", stack && "stack-table", className)}
+      >
+        {children}
+      </table>
     </div>
   );
 }
@@ -508,6 +618,7 @@ export function Th({ children, className, align }: { children?: ReactNode; class
   return (
     <th
       scope="col"
+      role="columnheader"
       className={cn(
         "border-b border-line bg-sunken/60 px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted first:pl-5 last:pr-5",
         align === "right" && "text-right",
@@ -519,9 +630,26 @@ export function Th({ children, className, align }: { children?: ReactNode; class
   );
 }
 
-export function Td({ children, className, align }: { children?: ReactNode; className?: string; align?: "right" }) {
+export function Td({
+  children,
+  className,
+  align,
+  label,
+  layout,
+}: {
+  children?: ReactNode;
+  className?: string;
+  align?: "right";
+  /** Column name shown beside the value when the table is stacked. */
+  label?: string;
+  /** Stacked tables only: `lead` = the row's title, `block` = full width, `actions` = buttons. */
+  layout?: "lead" | "block" | "actions";
+}) {
   return (
     <td
+      role="cell"
+      data-label={label}
+      data-layout={layout}
       className={cn(
         "border-b border-line px-4 py-3 align-middle first:pl-5 last:pr-5",
         align === "right" && "num text-right",
@@ -546,7 +674,7 @@ export function Segmented<T extends string>({
   label: string;
 }) {
   return (
-    <div role="group" aria-label={label} className="inline-flex max-w-full flex-wrap gap-1 rounded-control bg-sunken p-1">
+    <div role="group" aria-label={label} className="no-scrollbar inline-flex max-w-full gap-1 overflow-x-auto rounded-control bg-sunken p-1">
       {options.map((option) => (
         <button
           key={option.value}
@@ -554,7 +682,7 @@ export function Segmented<T extends string>({
           aria-pressed={value === option.value}
           onClick={() => onChange(option.value)}
           className={cn(
-            "inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-[0.8125rem] font-medium transition-colors",
+            "inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-[0.8125rem] font-medium transition-colors",
             value === option.value ? "bg-surface text-ink shadow-card" : "text-muted hover:text-ink",
           )}
         >

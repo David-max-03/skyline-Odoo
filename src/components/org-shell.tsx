@@ -10,15 +10,15 @@ import {
   LogOut,
   Megaphone,
   Menu,
+  Receipt,
   ScanLine,
   Shirt,
-  Sparkles,
   Users,
   Wallet,
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api } from "@/lib/api-client";
 import { ROLE_LABELS } from "@/lib/contracts";
 import { Logo } from "./public-shell";
@@ -38,7 +38,6 @@ export const ORG_NAV: { heading: string; items: NavItem[] }[] = [
     heading: "Overview",
     items: [
       { href: "/org", label: "Dashboard", icon: LayoutDashboard, exact: true },
-      { href: "/org/assistant", label: "Assistant", icon: Sparkles },
     ],
   },
   {
@@ -53,6 +52,7 @@ export const ORG_NAV: { heading: string; items: NavItem[] }[] = [
     heading: "Club",
     items: [
       { href: "/org/finance", label: "Finance", icon: Wallet },
+      { href: "/org/claims", label: "Expense claims", icon: Receipt },
       { href: "/org/members", label: "Members", icon: Users },
       { href: "/org/merch", label: "Merchandise", icon: Shirt },
       { href: "/org/announcements", label: "Announcements", icon: Megaphone },
@@ -79,12 +79,13 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
                     onClick={onNavigate}
                     aria-current={active ? "page" : undefined}
                     className={cn(
-                      "flex h-10 items-center gap-3 rounded-control px-3 text-sm font-medium transition-colors",
+                      "relative flex h-10 items-center gap-3 rounded-control px-3 text-sm font-medium transition-colors",
                       active
                         ? "bg-night-raised text-white"
                         : "text-on-night-muted hover:bg-night-raised/60 hover:text-on-night",
                     )}
                   >
+                    {active && <span aria-hidden className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-accent" />}
                     <item.icon className={cn("size-[1.125rem] shrink-0", active && "text-accent")} aria-hidden />
                     {item.label}
                   </Link>
@@ -153,9 +154,32 @@ function AccountPanel() {
   );
 }
 
-/** Sidebar on desktop, top bar with a slide-in menu on phones. */
+/** The four pages staff reach for on a phone. Everything else is one tap away under More. */
+const TABS: NavItem[] = [
+  { href: "/org", label: "Home", icon: LayoutDashboard, exact: true },
+  { href: "/org/events", label: "Events", icon: CalendarDays },
+  { href: "/org/check-in", label: "Check-in", icon: ScanLine },
+  { href: "/org/finance", label: "Finance", icon: Wallet },
+];
+
+const isActive = (item: NavItem, pathname: string) =>
+  item.exact ? pathname === item.href : pathname.startsWith(item.href);
+
+/** Sidebar on desktop; top bar, bottom tabs and a full menu on phones. */
 export function OrgShell({ children }: { children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const pathname = usePathname();
+  const user = useSession();
+  const onTabPage = TABS.some((tab) => isActive(tab, pathname));
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menuOpen]);
 
   return (
     <div className="min-h-dvh lg:pl-(--sidebar-width)">
@@ -171,15 +195,7 @@ export function OrgShell({ children }: { children: ReactNode }) {
         <Link href="/org" aria-label="Skyline dashboard">
           <Logo onDark />
         </Link>
-        <button
-          type="button"
-          onClick={() => setMenuOpen(true)}
-          aria-label="Open menu"
-          aria-expanded={menuOpen}
-          className="flex size-11 items-center justify-center rounded-control text-on-night hover:bg-night-raised"
-        >
-          <Menu className="size-5" aria-hidden />
-        </button>
+        <span className="text-xs font-medium text-on-night-muted">{ROLE_LABELS[user.role]}</span>
       </header>
 
       {menuOpen && (
@@ -208,9 +224,47 @@ export function OrgShell({ children }: { children: ReactNode }) {
         </div>
       )}
 
-      <main id="main" className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+      <main id="main" className="pb-tabbar mx-auto w-full max-w-6xl px-4 pt-6 sm:px-6 sm:pt-8 lg:px-8">
         {children}
       </main>
+
+      <nav
+        aria-label="Quick navigation"
+        className="no-print h-tabbar fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-night-line bg-night lg:hidden"
+      >
+        {TABS.map((tab) => {
+          const active = isActive(tab, pathname);
+          return (
+            <Link
+              key={tab.href}
+              href={tab.href}
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "relative flex flex-col items-center justify-center gap-1 text-[0.6875rem] font-medium transition-colors",
+                active ? "text-white" : "text-on-night-muted hover:text-on-night",
+              )}
+            >
+              {active && <span aria-hidden className="absolute inset-x-5 top-0 h-0.5 rounded-full bg-accent" />}
+              <tab.icon className={cn("size-5", active && "text-accent")} aria-hidden />
+              {tab.label}
+            </Link>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => setMenuOpen(true)}
+          aria-expanded={menuOpen}
+          aria-label="More pages"
+          className={cn(
+            "relative flex flex-col items-center justify-center gap-1 text-[0.6875rem] font-medium transition-colors",
+            !onTabPage ? "text-white" : "text-on-night-muted hover:text-on-night",
+          )}
+        >
+          {!onTabPage && <span aria-hidden className="absolute inset-x-5 top-0 h-0.5 rounded-full bg-accent" />}
+          <Menu className={cn("size-5", !onTabPage && "text-accent")} aria-hidden />
+          More
+        </button>
+      </nav>
     </div>
   );
 }

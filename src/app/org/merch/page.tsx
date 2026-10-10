@@ -18,13 +18,16 @@ import {
   PageHeader,
   Table,
   Td,
+  SelectField,
   TextAreaField,
   TextField,
   Th,
   cn,
 } from "@/components/ui";
 import { api, errorMessage, fieldErrors, useApi } from "@/lib/api-client";
-import { SETTINGS, type Order, type Product } from "@/lib/contracts";
+import { ProductEditor } from "@/components/product-editor";
+import { ProductPhoto } from "@/components/shop-ui";
+import { PRODUCT_CATEGORIES, PRODUCT_CATEGORY_LABELS, SETTINGS, type Order, type Product } from "@/lib/contracts";
 import { formatShortDateTime } from "@/lib/dates";
 import { CURRENCY, parseMoney } from "@/lib/money";
 
@@ -38,6 +41,8 @@ export default function MerchPage() {
   const products = useApi<Product[]>("/api/products");
   const orders = useApi<Order[]>("/api/orders");
   const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const editing = products.data?.find((p) => p.id === editingId) ?? null;
   const [cancelling, setCancelling] = useState<Order | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -115,13 +120,30 @@ export default function MerchPage() {
           {products.data.map((product) => (
             <Card key={product.id}>
               <CardHeader
-                title={product.name}
+                title={
+                  <span className="flex items-center gap-3">
+                    <ProductPhoto url={product.images[0]?.url} name="" className="size-11 shrink-0 rounded-control border border-line" />
+                    <span className="min-w-0">
+                      {product.name}
+                      <span className="block text-xs font-normal text-muted">{PRODUCT_CATEGORY_LABELS[product.category]}</span>
+                    </span>
+                  </span>
+                }
                 description={
                   <>
                     <Money cents={product.priceCents} /> · members <Money cents={product.memberPriceCents} /> · {product.unitsSold} sold
                   </>
                 }
-                action={!product.active && <Badge>Not on sale</Badge>}
+                action={
+                  <>
+                    {!product.active && <Badge>Not on sale</Badge>}
+                    {canManage && (
+                      <Button size="sm" variant="secondary" onClick={() => setEditingId(product.id)}>
+                        Edit
+                      </Button>
+                    )}
+                  </>
+                }
               />
               <ul className="grid grid-cols-2 gap-3 p-5 sm:grid-cols-4">
                 {product.variants.map((v) => (
@@ -150,7 +172,7 @@ export default function MerchPage() {
         ) : orders.data.length === 0 ? (
           <EmptyState icon={ShoppingBag} title="No orders yet" description="Orders placed in the public shop appear here." />
         ) : (
-          <Table>
+          <Table stack>
             <thead>
               <tr>
                 <Th>Order</Th>
@@ -158,27 +180,33 @@ export default function MerchPage() {
                 <Th>Item</Th>
                 <Th align="right">Total</Th>
                 <Th>Status</Th>
-                <Th />
+                <Th>
+                  <span className="sr-only">Actions</span>
+                </Th>
               </tr>
             </thead>
             <tbody>
               {orders.data.map((o) => (
-                <tr key={o.id} className={o.status === "cancelled" ? "text-subtle" : "hover:bg-sunken/50"}>
-                  <Td>
-                    <div className="font-mono text-[0.8125rem] text-ink">{o.code}</div>
-                    <div className="text-xs text-muted">{formatShortDateTime(o.createdAt)}</div>
+                <tr key={o.id} className={o.status === "cancelled" ? "text-subtle" : "transition-colors hover:bg-sunken/50"}>
+                  <Td label="Order">
+                    <div>
+                      <div className="font-mono text-[0.8125rem] text-ink">{o.code}</div>
+                      <div className="text-xs text-muted">{formatShortDateTime(o.createdAt)}</div>
+                    </div>
                   </Td>
-                  <Td>
+                  <Td layout="lead" className="max-sm:order-first">
                     <div className="font-medium text-ink">{o.buyerName}</div>
                     <div className="text-[0.8125rem] text-muted">{o.memberNo ? `Member ${o.memberNo}` : o.buyerEmail}</div>
                   </Td>
-                  <Td>
-                    {o.quantity} × {o.productName} <span className="text-muted">({o.size})</span>
+                  <Td label="Item">
+                    <span>
+                      {o.quantity} × {o.productName} <span className="text-muted">({o.size})</span>
+                    </span>
                   </Td>
-                  <Td align="right">
+                  <Td label="Total" align="right">
                     <Money cents={o.totalCents} className="font-medium text-ink" />
                   </Td>
-                  <Td>
+                  <Td label="Status">
                     <div className="flex flex-wrap gap-1">
                       {o.status !== "cancelled" && (
                         <Badge tone={o.paymentStatus === "paid" ? "ok" : "warn"}>{o.paymentStatus === "paid" ? "Paid" : "Unpaid"}</Badge>
@@ -186,7 +214,7 @@ export default function MerchPage() {
                       <OrderStatusBadge status={o.status} />
                     </div>
                   </Td>
-                  <Td>
+                  <Td layout="actions">
                     {canManage && o.status === "placed" && (
                       <div className="flex justify-end gap-1">
                         {o.paymentStatus === "pending" ? (
@@ -210,6 +238,10 @@ export default function MerchPage() {
           </Table>
         )}
       </Card>
+
+      <Dialog open={editing !== null} onClose={() => setEditingId(null)} title="Edit product" description={editing?.name} size="lg">
+        {editing && <ProductEditor key={editing.id} product={editing} onChanged={() => products.reload()} onClose={() => setEditingId(null)} />}
+      </Dialog>
 
       <Dialog open={adding} onClose={() => setAdding(false)} title="Add a product">
         {adding && (
@@ -297,7 +329,7 @@ function StockCell({
 }
 
 function ProductForm({ onSaved, onCancel }: { onSaved: () => void; onCancel: () => void }) {
-  const [values, setValues] = useState({ name: "", description: "", price: "", memberPrice: "" });
+  const [values, setValues] = useState({ name: "", category: "apparel", description: "", price: "", memberPrice: "" });
   const [sizes, setSizes] = useState([
     { size: "S", stock: "0" },
     { size: "M", stock: "0" },
@@ -327,7 +359,7 @@ function ProductForm({ onSaved, onCancel }: { onSaved: () => void; onCancel: () 
     try {
       await api("/api/products", {
         method: "POST",
-        body: { name: values.name, description: values.description, priceCents, memberPriceCents, active: true, variants },
+        body: { name: values.name, category: values.category, description: values.description, priceCents, memberPriceCents, active: true, variants },
       });
       onSaved();
     } catch (error) {
@@ -341,7 +373,17 @@ function ProductForm({ onSaved, onCancel }: { onSaved: () => void; onCancel: () 
   return (
     <form onSubmit={submit} noValidate className="space-y-4">
       <FormError message={formError} />
-      <TextField label="Product name" value={values.name} onChange={set("name")} error={errors.name} placeholder="Skyline Hoodie" required autoFocus />
+      <div className="grid gap-4 sm:grid-cols-[1fr_12rem]">
+        <TextField label="Product name" value={values.name} onChange={set("name")} error={errors.name} placeholder="Skyline Hoodie" required autoFocus />
+        <SelectField label="Category" value={values.category} onChange={set("category")} error={errors.category}>
+          {PRODUCT_CATEGORIES.map((c) => (
+            <option key={c} value={c}>
+              {PRODUCT_CATEGORY_LABELS[c]}
+            </option>
+          ))}
+        </SelectField>
+      </div>
+      <p className="-mt-2 text-[0.8125rem] text-muted">Add photos after saving, with Edit on the product card.</p>
       <div className="grid gap-4 sm:grid-cols-2">
         <TextField label="Price" prefix={SYMBOL} inputMode="decimal" value={values.price} onChange={set("price")} error={errors.priceCents} required />
         <TextField label="Member price" prefix={SYMBOL} inputMode="decimal" value={values.memberPrice} onChange={set("memberPrice")} error={errors.memberPriceCents} optional hint="Blank = same as price" />

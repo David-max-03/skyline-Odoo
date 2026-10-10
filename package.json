@@ -13,7 +13,6 @@
     "e2e": "tsx scripts/e2e.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.133.0",
     "clsx": "^2.1.1",
     "jsqr": "^1.4.0",
     "lucide-react": "^1.54.0",

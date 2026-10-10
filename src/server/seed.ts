@@ -6,14 +6,16 @@ import {
   type TransactionInput,
 } from "@/lib/contracts";
 import { addDays, ymdInTz } from "@/lib/dates";
-import { countUsers, createUser } from "./auth";
+import { completeSetup, countUsers, createSetupToken, createUser } from "./auth";
 import { setClock, wipeAllData } from "./db";
 import { createAnnouncement } from "./services/announcements";
+import { submitApplication } from "./services/applications";
 import { createEvent, setEventStatus } from "./services/events";
 import { createTransaction } from "./services/finance";
-import { createMember, joinAsMember, listMembers } from "./services/members";
+import { createMember, listMembers } from "./services/members";
+import { removeAllUploads } from "./storage";
 import { actOnOrder, createProduct, listOrders, placeOrder } from "./services/merch";
-import { createTask } from "./services/tasks";
+import { createTask, transitionTask } from "./services/tasks";
 import { checkIn, listEventTickets, registerForEvent } from "./services/tickets";
 
 /**
@@ -27,11 +29,16 @@ import { checkIn, listEventTickets, registerForEvent } from "./services/tickets"
 
 export const DEMO_PASSWORD = "skyline-demo";
 
-export const DEMO_ACCOUNTS = [
+const DEMO_STAFF = [
   { email: "president@skyline.club", name: "Aarav Mehta", role: "admin" },
   { email: "treasurer@skyline.club", name: "Priya Nair", role: "treasurer" },
   { email: "events@skyline.club", name: "Rohan Das", role: "organizer" },
 ] as const;
+
+/** A paid-up member who has set a password, so the member side can be shown. */
+const DEMO_MEMBER = { email: "ananya.rao@campus.example", name: "Ananya Rao", role: "member" } as const;
+
+export const DEMO_ACCOUNTS = [...DEMO_STAFF, DEMO_MEMBER] as const;
 
 const MEMBER_NAMES = [
   "Ananya Rao", "Kabir Shah", "Meera Iyer", "Dev Malhotra", "Isha Kapoor", "Arjun Reddy",
@@ -88,9 +95,10 @@ export function seedDemoData(): SeedSummary {
     return d.toISOString();
   };
 
+  removeAllUploads();
   wipeAllData();
 
-  const [admin, treasurer, organizer] = DEMO_ACCOUNTS.map((a) =>
+  const [admin, treasurer, organizer] = DEMO_STAFF.map((a) =>
     createUser({ ...a, password: DEMO_PASSWORD }),
   ) as [SessionUser, SessionUser, SessionUser];
 
@@ -113,10 +121,29 @@ export function seedDemoData(): SeedSummary {
       // Lapsed: the paid term ended a few weeks ago.
       at(-200, () => createMember({ ...input, duesPaid: true, expiresOn: day([-15, -40][i - 19]) }, treasurer));
     } else {
-      // Signed up at the campus table; dues not collected yet.
-      at(-3 + (i - 21), () => joinAsMember({ name, email: input.email, studentId: input.studentId, phone: null }));
+      // Added at the campus table; dues not collected yet.
+      at(-3 + (i - 21), () => createMember({ ...input, duesPaid: false, expiresOn: null }, treasurer));
     }
   });
+
+  // One member has set a password through the same one-time link real members use.
+  const demoMember = listMembers().find((m) => m.email === DEMO_MEMBER.email)!;
+  completeSetup(createSetupToken(demoMember.id, admin.id).token, DEMO_PASSWORD);
+
+  // Two people have applied and say they paid in cash. Nobody has verified it yet.
+  at(-1, () =>
+    submitApplication(
+      { name: "Rhea Kulkarni", email: "rhea.kulkarni@campus.example", studentId: "SKY20260412", phone: null, paymentMethod: "cash", paymentReference: "Paid Priya at the freshers' table" },
+      null,
+    ),
+  );
+  at(-0.2, () =>
+    submitApplication(
+      { name: "Aman Trivedi", email: "aman.trivedi@campus.example", studentId: null, phone: null, paymentMethod: "cash", paymentReference: "Gave cash to Rohan after the meeting" },
+      null,
+    ),
+  );
+
   const activeMembers = listMembers().filter((m) => m.status === "active" || m.status === "expiring");
 
   // --- events ----------------------------------------------------------------
@@ -187,7 +214,7 @@ export function seedDemoData(): SeedSummary {
   ledger(-42, treasurer, { type: "income", category: "sponsorship", amountCents: 500000, status: "settled", description: "Campus Café sponsorship for the mixer", counterparty: "Campus Café", eventId: mixer.id });
   ledger(-38, treasurer, { type: "expense", category: "venue", amountCents: 300000, status: "settled", description: "Hall B booking fee", counterparty: "Student Centre", eventId: mixer.id });
   ledger(-35, treasurer, { type: "expense", category: "catering", amountCents: 650000, status: "settled", description: "Snacks and soft drinks for 80", counterparty: "Tiffin Box Caterers", eventId: mixer.id });
-  ledger(-34, organizer, { type: "expense", category: "supplies", amountCents: 120000, status: "pending", description: "Balloons, name tags and fairy lights (receipt #214)", counterparty: "Rohan Das", eventId: mixer.id });
+  ledger(-34, treasurer, { type: "expense", category: "supplies", amountCents: 120000, status: "pending", description: "Balloons, name tags and fairy lights (receipt #214)", counterparty: "Rohan Das", eventId: mixer.id });
 
   const openMic = run(
     event({
@@ -217,7 +244,7 @@ export function seedDemoData(): SeedSummary {
   );
   ledger(-12, treasurer, { type: "income", category: "fundraiser", amountCents: 840000, status: "settled", description: "Bake sale table takings (cash and UPI)", method: "cash", eventId: bakeSale.id });
   ledger(-14, treasurer, { type: "expense", category: "supplies", amountCents: 215000, status: "settled", description: "Flour, butter, sugar and packaging", counterparty: "FreshMart", eventId: bakeSale.id });
-  ledger(-11, organizer, { type: "expense", category: "reimbursement", amountCents: 64000, status: "pending", description: "Extra baking trays and parchment (receipt #231)", counterparty: "Meera Iyer", eventId: bakeSale.id });
+  ledger(-11, treasurer, { type: "expense", category: "reimbursement", amountCents: 64000, status: "pending", description: "Extra baking trays and parchment (receipt #231)", counterparty: "Meera Iyer", eventId: bakeSale.id });
 
   const hackNight = run(
     event({
@@ -233,7 +260,7 @@ export function seedDemoData(): SeedSummary {
     { publishDay: -10, registrations: 37, members: 12, paid: 30, eventDay: 6 },
   );
   ledger(-8, treasurer, { type: "income", category: "sponsorship", amountCents: 400000, status: "settled", description: "DevTools Inc. sponsorship for Hack Night", counterparty: "DevTools Inc.", eventId: hackNight.id });
-  ledger(-1, organizer, { type: "expense", category: "catering", amountCents: 350000, status: "pending", description: "Pizza pre-order for 40 (quote #88)", counterparty: "Slice House", eventId: hackNight.id });
+  ledger(-1, treasurer, { type: "expense", category: "catering", amountCents: 350000, status: "pending", description: "Pizza pre-order for 40 (quote #88)", counterparty: "Slice House", eventId: hackNight.id });
 
   const gala = run(
     event({
@@ -252,8 +279,8 @@ export function seedDemoData(): SeedSummary {
   ledger(-16, treasurer, { type: "income", category: "sponsorship", amountCents: 1000000, status: "settled", description: "Orchid Hotel partnership contribution", counterparty: "Orchid Hotel", eventId: gala.id });
   ledger(-15, treasurer, { type: "expense", category: "venue", amountCents: 1800000, status: "settled", description: "Ballroom deposit", counterparty: "Orchid Hotel", eventId: gala.id });
   ledger(-6, treasurer, { type: "expense", category: "marketing", amountCents: 350000, status: "settled", description: "Posters, banners and wristbands", counterparty: "PrintWorks", eventId: gala.id });
-  ledger(-4, organizer, { type: "expense", category: "catering", amountCents: 2400000, status: "pending", description: "Dinner for 120, balance due on the night", counterparty: "Orchid Hotel", eventId: gala.id });
-  ledger(-2, organizer, { type: "expense", category: "equipment", amountCents: 900000, status: "pending", description: "DJ, sound and lighting", counterparty: "Decibel Rentals", eventId: gala.id });
+  ledger(-4, treasurer, { type: "expense", category: "catering", amountCents: 2400000, status: "pending", description: "Dinner for 120, balance due on the night", counterparty: "Orchid Hotel", eventId: gala.id });
+  ledger(-2, treasurer, { type: "expense", category: "equipment", amountCents: 900000, status: "pending", description: "DJ, sound and lighting", counterparty: "Decibel Rentals", eventId: gala.id });
 
   at(-1, () =>
     createEvent(
@@ -277,8 +304,20 @@ export function seedDemoData(): SeedSummary {
   ledger(-9, treasurer, { type: "expense", category: "other_expense", amountCents: 120000, status: "settled", description: "Website domain and hosting renewal", counterparty: "HostHub" });
 
   // --- volunteer tasks -------------------------------------------------------
+  // Volunteers who are members get the task on their own account; committee names stay as text.
+  const memberIdByName = new Map(listMembers().map((m) => [m.name, m.id]));
   const task = (title: string, assignee: string | null, due: number | null, status: "todo" | "in_progress" | "done", eventId: string | null, description = "") =>
-    at(-7, () => createTask({ title, description, assignee, dueOn: due === null ? null : day(due), status, eventId }, organizer));
+    at(-7, () => {
+      const created = createTask(
+        { title, description, assignee, assigneeMemberId: (assignee && memberIdByName.get(assignee)) || null, dueOn: due === null ? null : day(due), eventId },
+        organizer,
+      );
+      // Status only moves one step at a time, for seeded tasks as for everyone else.
+      if (status !== "todo") transitionTask(created.id, "start", organizer);
+      if (status === "done") transitionTask(created.id, "done", organizer);
+    });
+  task("Run the welcome desk at Hack Night", "Ananya Rao", 6, "todo", hackNight.id, "Hand out name tags and point people to Lab 2.");
+  task("Collect RSVPs from first-year reps", "Ananya Rao", 2, "in_progress", gala.id);
   task("Book DJ and sound system", "Kabir Shah", -2, "todo", gala.id, "Get a written quote and confirm load-in time with the hotel.");
   task("Design and print gala posters", "Isha Kapoor", -5, "in_progress", gala.id);
   task("Collect sponsor logo files", null, -1, "todo", gala.id, "Needed for the stage backdrop.");
@@ -301,6 +340,7 @@ export function seedDemoData(): SeedSummary {
     createProduct(
       {
         name: "Skyline Hoodie",
+        category: "apparel",
         description: "Heavyweight navy hoodie with the embroidered skyline crest.",
         priceCents: 120000,
         memberPriceCents: 100000,
@@ -314,6 +354,7 @@ export function seedDemoData(): SeedSummary {
     createProduct(
       {
         name: "Club T-Shirt",
+        category: "apparel",
         description: "Soft cotton tee in sky blue. Runs true to size.",
         priceCents: 45000,
         memberPriceCents: 38000,

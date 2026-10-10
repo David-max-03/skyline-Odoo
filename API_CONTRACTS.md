@@ -102,7 +102,9 @@ entries can be edited; `manual` and `refund` entries can be voided. Settling a `
 |---|---|---|---|
 | `GET /api/tasks` · `POST /api/tasks` | staff | `taskInputSchema` | `Task[]` · `Task` |
 | `PUT /api/tasks/:id` | staff | `taskInputSchema` | `Task` |
-| `PATCH /api/tasks/:id` | staff | `{ status }` | `Task` |
+| `PATCH /api/tasks/:id` | staff | `{ action: "start" \| "done" \| "reopen" }` | `Task`; 409 `invalid_transition` if the action does not fit the current status |
+| `GET /api/me/tasks` | member | — | `Task[]` assigned to the signed-in member |
+| `PATCH /api/me/tasks/:id` | member | `{ action }` | `Task`; 404 for any task not assigned to them |
 | `DELETE /api/tasks/:id` | A, O | — | `{ ok }` |
 | `GET /api/announcements` | staff | — | `Announcement[]` |
 | `POST /api/announcements` | A, O | `announcementInputSchema` | `Announcement` |
@@ -113,17 +115,6 @@ entries can be edited; `manual` and `refund` entries can be voided. Settling a `
 | `POST /api/products/:id` | A, T | `{ variantId, stock }` | `Product` |
 | `GET /api/orders` | staff | — | `Order[]` |
 | `POST /api/orders/:id` | A, T | `{ action: "pay" \| "fulfil" \| "cancel", method? }` | `{ order, refundDueCents }` |
-
-## Assistant
-
-| Method and path | Access | Body | Returns |
-|---|---|---|---|
-| `GET /api/assistant` | staff | — | `{ engine, label, suggestions }` |
-| `POST /api/assistant` | staff | `{ question }` | `AssistantAnswer` |
-
-`AssistantAnswer.engine` is `"rules"` or `"claude"`. Each entry in `facts` has
-`kind: "actual" | "estimate" | "recommendation"`. `notice` is set when the assistant made
-an assumption (for example, which event) or fell back to the rule engine.
 
 ## Public (no session)
 
@@ -136,11 +127,76 @@ an assumption (for example, which event) or fell back to the rule engine.
 | `GET /api/public/announcements` | — | `PublicAnnouncement[]` (audience `everyone` only) |
 | `GET /api/public/products` | — | `PublicProduct[]` |
 | `POST /api/public/orders` | `orderInputSchema` | `PublicOrder` |
-| `POST /api/public/join` | `memberJoinSchema` | `JoinResult` |
+| `GET /api/public/membership` | — | `PaymentInstructions` (`upi` is null until `SKYLINE_UPI_ID` is set; `online.available` is true only when Razorpay test mode is configured) |
+| `POST /api/public/membership/online` | `onlineApplicationInputSchema` | `OnlineApplicationStart`: the Razorpay order for Checkout and a one-time `accessToken`. Creates no member. `503 payments_not_configured` when Razorpay is off |
+| `POST /api/public/membership/online/:id` | `onlineApplicationActionSchema` (`confirm`, `resume`, `failed`, `new_link`; all need `token`) | `OnlineApplicationState`. `setup` (the password link) appears only after the server has verified the payment with Razorpay |
+| `POST /api/webhooks/razorpay` | Raw JSON from Razorpay, with `X-Razorpay-Signature` | `{ outcome }`. `401 bad_signature` unless the signature matches the raw body. Not a browser endpoint |
+| `POST /api/public/applications` | multipart: `applicationInputSchema` fields + file `evidence` | `ApplicationReceipt` (always `pending`) |
+| `POST /api/public/applications/status` | `{ code, email }` | `ApplicationStatusView` |
+| `POST /api/auth/setup/check` | `{ token }` | `SetupTokenInfo` |
+| `POST /api/auth/setup` | `{ token, password }` | `{ memberNo }`; the link then stops working |
+
+## Membership review and member accounts
+
+| Method and path | Access | Body | Returns |
+|---|---|---|---|
+| `GET /api/applications` | A, T | — | `MembershipApplication[]` |
+| `POST /api/applications/:id` | A, T | `{ action: "approve", paymentReceived: true }` or `{ action: "reject", reason }` | `ApplicationReview` (with the one-time `setup` link on approval) |
+| `GET /api/online-applications` | A, T | — | `OnlinePayment[]` (Razorpay payments; those needing review first) |
+| `POST /api/online-applications/:id` | A, T | `{ action: "check" }`, `{ action: "activate" }` or `{ action: "refunded", note }` | `OnlineReconcileResult` (with `setup` when the action created the member) |
+| `POST /api/members/:id/setup-link` | A, T | — | `SetupLink` |
+| `GET /api/files/:id` | A, T | — | the image bytes |
+| `GET /api/me` | member | — | `MemberDetail` for the signed-in member |
+
+`POST /api/auth/login` takes `{ email, password }`, where `email` may be a staff email,
+a member's email or a member ID such as `SKY-M-0001`. `SessionUser.role` is `"member"`
+for member accounts, with `memberId` and `memberNo` set. Every staff endpoint answers a
+member account with 403.
 
 Registration and orders never take payment: they create a `pending` ledger entry that
 staff settle. Member prices apply only when `memberNo` and `email` both match a member
 whose paid term covers today; a mismatch is a `422` on `memberNo`.
+
+## Member area (`role: "member"` only; the member is always the signed-in one)
+
+| Method and path | Body | Returns |
+|---|---|---|
+| `PATCH /api/me` | `{ phone, studentId }` (nothing else can change) | `MemberDetail` |
+| `POST /api/me/password` | `{ currentPassword, newPassword }` | `{ ok }`; other sessions are ended |
+| `GET /api/me/payments` | — | `MemberPayment[]` |
+| `GET /api/me/announcements` | — | announcements, including member-only ones |
+| `POST /api/me/events/:id/register` | none | `{ code, priceCents, paymentStatus, isMember }`; price decided by the server |
+| `POST /api/me/tickets/:code/cancel` | none | `{ code, status }`; own, unpaid, unused tickets only |
+| `POST /api/me/checkout` | `{ items: [{ variantId, quantity }] }` | `ShopOrder` |
+| `GET /api/me/orders` | — | `ShopOrder[]` |
+
+## Shop
+
+| Method and path | Access | Body | Returns |
+|---|---|---|---|
+| `GET /api/public/products` · `GET /api/public/products/:id` | public | — | `PublicProduct[]` · `PublicProduct` |
+| `GET /api/public/product-images/:id` | public | — | image bytes (product photos only) |
+| `POST /api/public/checkout` | public | `{ items: [{ variantId, quantity }], name, email, memberNo? }` | `ShopOrder` |
+| `POST /api/products/:id/images` | A, T | multipart, file `image` | `Product` |
+| `DELETE /api/products/:id/images/:imageId` | A, T | — | `Product` |
+| `POST /api/products/:id/variants` | A, T | `{ size, stock }` | `Product` |
+
+A checkout is all-or-nothing and is priced on the server from the product rows; price,
+total and payment fields sent by a client are dropped by the schema. Every line comes
+back `paymentStatus: "pending"`. Staff record payment and hand-over per line with the
+existing `POST /api/orders/:id`. `productInputSchema` and `productUpdateSchema` now take
+`category`.
+
+## Expense claims
+
+| Method and path | Access | Body | Returns |
+|---|---|---|---|
+| `GET /api/claims` | any signed-in account | — | `ClaimList`: all claims for A and T, own claims otherwise |
+| `POST /api/claims` | staff, and members with an assigned task | multipart: `claimInputSchema` fields + file `evidence` (required) | `ExpenseClaim` |
+| `POST /api/claims/:id` | A, T, never the claimant | `{ action: "start_review" }`, `{ action: "approve", note? }`, `{ action: "reject", reason }` or `{ action: "pay", method }` | `ExpenseClaim` |
+
+`GET /api/files/:id` serves a receipt to A, T and the claimant only. `POST
+/api/transactions` is now A and T only: organizers file claims instead.
 
 ## Adding an endpoint
 

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { CalendarDays, MapPin } from "lucide-react";
-import { Money } from "@/components/domain";
+import { DateBlock, Money } from "@/components/domain";
 import { Badge, Card, EmptyState, ErrorState, Meter, PageHeader, Skeleton } from "@/components/ui";
 import { useApi } from "@/lib/api-client";
 import type { PublicEvent } from "@/lib/contracts";
@@ -37,14 +37,17 @@ export default function PublicEventsPage() {
                   href={`/events/${event.id}`}
                   className="group grid gap-4 rounded-card border border-line bg-surface p-5 shadow-card transition-colors hover:border-brand-line sm:grid-cols-[1fr_13rem]"
                 >
-                  <div className="min-w-0">
-                    <h2 className="text-xl font-bold group-hover:text-brand">{event.title}</h2>
-                    <p className="mt-1 text-sm text-body">{formatDateTime(event.startsAt)}</p>
-                    <p className="flex items-center gap-1 text-sm text-muted">
-                      <MapPin className="size-3.5 shrink-0" aria-hidden />
-                      {event.venue}
-                    </p>
-                    {event.description && <p className="mt-2 line-clamp-2 text-sm text-muted">{event.description}</p>}
+                  <div className="flex min-w-0 items-start gap-4">
+                    <DateBlock iso={event.startsAt} />
+                    <div className="min-w-0">
+                      <h2 className="text-xl font-bold group-hover:text-brand">{event.title}</h2>
+                      <p className="mt-1 text-sm text-body">{formatDateTime(event.startsAt)}</p>
+                      <p className="flex items-center gap-1 text-sm text-muted">
+                        <MapPin className="size-3.5 shrink-0" aria-hidden />
+                        {event.venue}
+                      </p>
+                      {event.description && <p className="mt-2 line-clamp-2 text-sm text-muted">{event.description}</p>}
+                    </div>
                   </div>
                   <div className="flex flex-col justify-between gap-3 sm:items-end sm:text-right">
                     <div>
@@ -63,7 +66,7 @@ export default function PublicEventsPage() {
                           <Badge tone="bad">Sold out</Badge>
                         ) : (
                           <span className="text-muted">
-                            <span className="num font-medium text-ink">{event.remaining}</span> of {event.capacity} seats left
+                            <span className="num font-medium text-ink">{event.remaining}</span> seats left · {taken} of {event.capacity} taken
                           </span>
                         )}
                       </div>

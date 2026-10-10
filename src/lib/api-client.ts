@@ -26,6 +26,8 @@ export class ApiError extends Error {
 export interface ApiOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
+  /** Send a multipart form instead of JSON, for requests that carry a file. */
+  form?: FormData;
   signal?: AbortSignal;
 }
 
@@ -34,8 +36,9 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
   try {
     response = await fetch(path, {
       method: options.method ?? "GET",
-      headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      // For a form the browser sets the multipart content type and boundary itself.
+      headers: options.form || options.body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: options.form ?? (options.body === undefined ? undefined : JSON.stringify(options.body)),
       credentials: "same-origin",
       cache: "no-store",
       signal: options.signal,
@@ -53,11 +56,11 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
 
   if (!response.ok) {
     const error = (payload as ApiErrorBody | null)?.error;
-    // A staff page whose session has ended goes back to sign-in.
+    // A staff or member page whose session has ended goes back to sign-in.
     if (
       response.status === 401 &&
       typeof window !== "undefined" &&
-      window.location.pathname.startsWith("/org")
+      /^\/(org|member)(\/|$)/.test(window.location.pathname)
     ) {
       const next = encodeURIComponent(window.location.pathname + window.location.search);
       // A full page load on purpose: it drops all client state held for the old session.

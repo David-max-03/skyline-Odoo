@@ -49,8 +49,13 @@ Copy `.env.example` to `.env.local`. Everything is optional in development.
 | Variable | Default | Purpose |
 |---|---|---|
 | `SKYLINE_DB_PATH` | `./data/skyline.db` | Where the SQLite file lives |
-| `ANTHROPIC_API_KEY` | unset | Enables the Claude engine for the assistant. Unset = rule-based engine |
-| `SKYLINE_ASSISTANT_MODEL` | `claude-opus-5-5` | Model used when the key is set |
+| `SKYLINE_UPLOAD_DIR` | `uploads` beside the database | Where payment screenshots and receipts are stored. Keep it out of any public folder |
+| `SKYLINE_UPI_ID` | unset | The club's real UPI ID. When set, the join page shows a payment QR code; when unset, no QR is shown |
+| `SKYLINE_UPI_PAYEE` | organisation name | Payee name encoded in the QR code |
+| `SKYLINE_RAZORPAY_MODE` | unset | Must be exactly `test` to turn online membership payment on. `live` is refused in this version |
+| `SKYLINE_RAZORPAY_KEY_ID` | unset | Razorpay **test** Key ID (`rzp_test_…`). A live key is refused |
+| `SKYLINE_RAZORPAY_KEY_SECRET` | unset | The matching Key Secret. Server-side only; never sent to the browser or logged |
+| `SKYLINE_RAZORPAY_WEBHOOK_SECRET` | unset | The secret set on the Razorpay webhook. Needed only to accept `/api/webhooks/razorpay` |
 | `SKYLINE_DEMO_MODE` | unset | `1` shows the demo sign-ins on `/login` in production |
 | `SKYLINE_AUTO_SEED` | unset | `0` stops development from seeding an empty database |
 | `SKYLINE_DISABLE_RATE_LIMIT` | unset | `1` turns off rate limits (used by the e2e script) |
@@ -61,6 +66,30 @@ Copy `.env.example` to `.env.local`. Everything is optional in development.
 
 `NEXT_PUBLIC_*` values are compiled into the browser bundle: rebuild after changing them.
 Never commit `.env.local` or the `data/` folder; both are git-ignored.
+
+## Online membership payment (Razorpay, test mode)
+
+Off by default. To turn it on locally:
+
+1. In the Razorpay dashboard, switch to **Test Mode** and generate an API key.
+2. Create `.env.local` (Git ignores it) with `SKYLINE_RAZORPAY_MODE=test`, `SKYLINE_RAZORPAY_KEY_ID` and
+   `SKYLINE_RAZORPAY_KEY_SECRET`. Never put the values in `.env.example` or any tracked file.
+3. Restart the server. `/join` now offers "Pay online" first, with the manual form underneath.
+
+Only test keys (`rzp_test_…`) are accepted; a live key or `SKYLINE_RAZORPAY_MODE=live` leaves online payment off.
+If the configuration is wrong, the server log names the variable (never its value) and the join page shows only the manual form.
+
+A membership is created only after the server has verified the payment with Razorpay: the Checkout signature plus the
+payment fetched from Razorpay's API, or a signed webhook. The order, amount, currency and `captured` status must all match.
+
+**Webhooks.** Razorpay cannot reach `localhost`. Without a webhook everything still works while the applicant's browser
+stays open, and an applicant who returns later (or a treasurer pressing "Check with Razorpay" on the Members page) recovers
+a payment that was missed. For a deployed server, add a webhook in the dashboard for
+`https://<your-host>/api/webhooks/razorpay` with events `payment.captured`, `order.paid` and `payment.failed`, and set
+`SKYLINE_RAZORPAY_WEBHOOK_SECRET` to the secret you chose there.
+
+**Test payments.** In test mode Razorpay Checkout accepts its documented test cards and the UPI ID `success@razorpay`
+(or `failure@razorpay`). UPI app hand-off on phones and UPI QR codes are live-mode features of Razorpay.
 
 ## The five-minute demo
 
@@ -83,9 +112,6 @@ Reset first so the numbers below are right: `npm run seed`, then `npm run dev`.
    says how many more tickets are needed.
 6. **Financial results** — Finance. Collected, paid out, what is left, and pending kept
    apart. The ledger shows the ticket payment and the hall hire.
-7. **Ask the assistant** — "How many tickets must the Spring Gala sell to break even?"
-   The answer (6 in total, 5 more) matches the break-even card on the event page, with
-   each figure marked Actual or Estimate. Then try "Which events are profitable?".
 
 To show role enforcement, sign in as the Treasurer: there is no "New event" button, and
 calling the API directly returns 403.

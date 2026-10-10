@@ -48,7 +48,7 @@ function TicketView() {
         </Notice>
       )}
 
-      <Card className="overflow-hidden">
+      <Card className="overflow-hidden shadow-raised">
         <div className="bg-night px-6 py-5">
           <p className="text-xs font-semibold uppercase tracking-wider text-accent">Skyline ticket</p>
           <h1 className="mt-1 text-2xl font-extrabold !text-white">{ticket.event.title}</h1>
@@ -59,7 +59,14 @@ function TicketView() {
           </p>
         </div>
 
-        <div className="px-6 py-6">
+        {/* The tear line of a paper ticket: two notches and a dashed rule. */}
+        <div aria-hidden className="relative h-0 bg-night">
+          <span className="absolute -left-3 -top-3 size-6 rounded-full bg-canvas" />
+          <span className="absolute -right-3 -top-3 size-6 rounded-full bg-canvas" />
+          <span className="absolute inset-x-6 top-0 border-t-2 border-dashed border-line" />
+        </div>
+
+        <div className="px-6 pb-6 pt-7">
           {dead ? (
             <Notice tone="bad" icon={Ban} title={ticket.event.status === "cancelled" ? "This event was cancelled" : "This ticket was cancelled"}>
               It can no longer be used for entry.

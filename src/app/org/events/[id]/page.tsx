@@ -36,6 +36,7 @@ import {
   FormError,
   LinkButton,
   LoadingBlock,
+  Meter,
   Notice,
   PageHeader,
   Segmented,
@@ -179,19 +180,11 @@ export default function EventDetailPage() {
                 <LinkButton href={`/events/${event.id}`} target="_blank" variant="ghost" icon={ExternalLink}>
                   Public page
                 </LinkButton>
-                <LinkButton href={`/org/check-in?event=${event.id}`} variant="secondary" icon={ScanLine}>
-                  Check-in
-                </LinkButton>
               </>
             )}
             {canManage && event.status !== "cancelled" && (
-              <Button variant="secondary" icon={Pencil} onClick={() => setEditing(true)}>
-                Edit
-              </Button>
-            )}
-            {canManage && event.status === "draft" && (
-              <Button icon={Check} loading={busy === "status-published"} onClick={() => setStatus("published")}>
-                Publish
+              <Button variant="ghost" icon={Ban} className="!text-bad hover:!bg-bad-soft" onClick={() => setConfirm("cancel-event")}>
+                Cancel event
               </Button>
             )}
             {canManage && event.status === "published" && valid.length === 0 && (
@@ -200,9 +193,20 @@ export default function EventDetailPage() {
               </Button>
             )}
             {canManage && event.status !== "cancelled" && (
-              <Button variant="danger" icon={Ban} onClick={() => setConfirm("cancel-event")}>
-                Cancel event
+              <Button variant="secondary" icon={Pencil} onClick={() => setEditing(true)}>
+                Edit
               </Button>
+            )}
+            {/* One primary action per state: publish a draft, or run the door for a live event. */}
+            {canManage && event.status === "draft" && (
+              <Button icon={Check} className="max-sm:order-first max-sm:w-full" loading={busy === "status-published"} onClick={() => setStatus("published")}>
+                Publish
+              </Button>
+            )}
+            {event.status === "published" && (
+              <LinkButton href={`/org/check-in?event=${event.id}`} icon={ScanLine} className="max-sm:order-first max-sm:w-full">
+                Check-in
+              </LinkButton>
             )}
           </>
         }
@@ -219,7 +223,7 @@ export default function EventDetailPage() {
         </Notice>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
         <Stat
           label="Registered"
           icon={Users}
@@ -230,7 +234,17 @@ export default function EventDetailPage() {
               <span className="text-base font-medium text-muted"> / {event.capacity}</span>
             </>
           }
-          detail={event.stats.remaining === 0 ? "Full" : `${event.stats.remaining} seats left`}
+          detail={
+            <>
+              <Meter
+                value={event.stats.registered}
+                max={event.capacity}
+                label="Seats taken"
+                tone={event.stats.remaining === 0 ? "bad" : "brand"}
+              />
+              <p className="mt-2">{event.stats.remaining === 0 ? "Full" : `${event.stats.remaining} seats left`}</p>
+            </>
+          }
         />
         <Stat
           label="Tickets paid"
@@ -259,7 +273,7 @@ export default function EventDetailPage() {
         />
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      <div className="mt-4 grid gap-4 lg:grid-cols-2 lg:items-start">
         <Card>
           <CardHeader
             title={
@@ -397,7 +411,7 @@ export default function EventDetailPage() {
               description={event.status === "draft" ? "Publish the event to open registration." : "Share the public page, or register someone at the desk."}
             />
           ) : (
-            <Table>
+            <Table stack>
               <thead>
                 <tr>
                   <Th>Attendee</Th>
@@ -411,28 +425,30 @@ export default function EventDetailPage() {
               <tbody>
                 {tickets.map((t) => (
                   <tr key={t.id} className={t.status === "cancelled" ? "text-subtle" : "hover:bg-sunken/50"}>
-                    <Td>
+                    <Td layout="lead">
                       <div className="font-medium text-ink">{t.attendeeName}</div>
                       <div className="text-[0.8125rem] text-muted">{t.attendeeEmail}</div>
                     </Td>
-                    <Td>
+                    <Td label="Ticket">
+                      <div>
                       <Link href={`/t/${t.code}`} target="_blank" className="font-mono text-[0.8125rem] text-brand hover:underline">
                         {t.code}
                       </Link>
                       {t.memberNo && <div className="text-xs text-muted">Member {t.memberNo}</div>}
+                      </div>
                     </Td>
-                    <Td align="right">{t.priceCents === 0 ? "Free" : <Money cents={t.priceCents} />}</Td>
-                    <Td>{t.status === "cancelled" ? <Badge tone="bad">Cancelled</Badge> : <PaymentBadge status={t.paymentStatus} />}</Td>
-                    <Td>
+                    <Td label="Price" align="right">{t.priceCents === 0 ? "Free" : <Money cents={t.priceCents} />}</Td>
+                    <Td label="Payment">{t.status === "cancelled" ? <Badge tone="bad">Cancelled</Badge> : <PaymentBadge status={t.paymentStatus} />}</Td>
+                    <Td label="Entry">
                       {t.checkedInAt ? (
                         <span className="text-[0.8125rem]">
                           <Badge tone="ok" icon={Check}>In</Badge> <span className="text-muted">{formatShortDateTime(t.checkedInAt)}</span>
                         </span>
                       ) : (
-                        <span className="text-subtle">—</span>
+                        <span className="text-subtle">Not yet</span>
                       )}
                     </Td>
-                    <Td>
+                    <Td layout="actions">
                       {t.status === "valid" && event.status === "published" && (
                         <div className="flex justify-end gap-1">
                           {t.paymentStatus === "pending" && (
@@ -481,7 +497,7 @@ export default function EventDetailPage() {
           ) : ledger.data.length === 0 ? (
             <EmptyState icon={Wallet} title="No money recorded for this event" description="Ticket charges appear here automatically. Add venue, catering and other costs yourself." />
           ) : (
-            <Table>
+            <Table stack>
               <thead>
                 <tr>
                   <Th>Date</Th>
@@ -494,14 +510,14 @@ export default function EventDetailPage() {
               <tbody>
                 {ledger.data.map((t) => (
                   <tr key={t.id} className="hover:bg-sunken/50">
-                    <Td className="whitespace-nowrap text-muted">{formatDate(t.occurredOn)}</Td>
-                    <Td>
+                    <Td label="Date" className="whitespace-nowrap text-muted">{formatDate(t.occurredOn)}</Td>
+                    <Td layout="lead" className="max-sm:order-first">
                       <div className="font-medium text-ink">{t.description}</div>
                       {t.counterparty && <div className="text-[0.8125rem] text-muted">{t.counterparty}</div>}
                     </Td>
-                    <Td className="text-muted">{CATEGORY_LABELS[t.category]}</Td>
-                    <Td><TransactionStatusBadge type={t.type} status={t.status} /></Td>
-                    <Td align="right">
+                    <Td label="Category" className="text-muted">{CATEGORY_LABELS[t.category]}</Td>
+                    <Td label="Status"><TransactionStatusBadge type={t.type} status={t.status} /></Td>
+                    <Td label="Amount" align="right">
                       <Money cents={t.type === "income" ? t.amountCents : -t.amountCents} signed className="font-medium text-ink" />
                     </Td>
                   </tr>

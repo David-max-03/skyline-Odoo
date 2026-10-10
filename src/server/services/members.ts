@@ -1,17 +1,17 @@
 import {
   SETTINGS,
-  type JoinResult,
   type Member,
   type MemberDetail,
   type MemberInput,
-  type MemberJoinInput,
   type MemberStatus,
   type MembershipPeriod,
   type PaymentMethod,
   type RenewInput,
   type SessionUser,
+  type SetupLink,
 } from "@/lib/contracts";
 import { addDays, daysBetween } from "@/lib/dates";
+import { createSetupToken } from "../auth";
 import { all, get, newId, nowIso, run, today, tx } from "../db";
 import { conflict, invalid, notFound, requireRole } from "../errors";
 import { recordTransaction, settlePendingFor } from "./finance";
@@ -33,10 +33,12 @@ interface MemberRow {
   created_at: string;
   paid_until: string | null;
   dues_owed: number;
+  has_account: number;
 }
 
 const SELECT = `
   SELECT m.*,
+    EXISTS (SELECT 1 FROM member_accounts a WHERE a.member_id = m.id) AS has_account,
     (SELECT MAX(p.ends_on) FROM membership_periods p
       WHERE p.member_id = m.id AND p.paid_at IS NOT NULL) AS paid_until,
     (SELECT COALESCE(SUM(p.amount_cents), 0) FROM membership_periods p
@@ -63,6 +65,7 @@ function toMember(r: MemberRow, on: string = today()): Member {
     duesOwedCents: r.dues_owed,
     status: memberStatus(r.paid_until, on),
     daysToExpiry: r.paid_until ? daysBetween(on, r.paid_until) : null,
+    hasAccount: r.has_account === 1,
     createdAt: r.created_at,
   };
 }
@@ -172,12 +175,17 @@ interface NewTerm {
   paid: boolean;
   method: PaymentMethod;
   createdBy: string | null;
+  /** Appended to the ledger description, e.g. the payment reference that was verified. */
+  note?: string;
+  /** What was actually paid, when that is known. Defaults to the current fee. */
+  amountCents?: number;
 }
 
 /** Adds a term and its dues entry in the ledger. Call inside a transaction. */
 function addTerm(t: NewTerm): void {
   const periodId = newId("per");
   const ts = nowIso();
+  const amountCents = t.amountCents ?? SETTINGS.membershipFeeCents;
   run(
     `INSERT INTO membership_periods (id, member_id, kind, starts_on, ends_on, amount_cents, paid_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -186,16 +194,18 @@ function addTerm(t: NewTerm): void {
     t.kind,
     t.startsOn,
     t.endsOn,
-    SETTINGS.membershipFeeCents,
+    amountCents,
     t.paid ? ts : null,
     ts,
   );
   recordTransaction({
     type: "income",
     category: "dues",
-    amountCents: SETTINGS.membershipFeeCents,
+    amountCents,
     status: t.paid ? "settled" : "pending",
-    description: `${t.kind === "new" ? "Membership dues" : "Membership renewal"} — ${t.memberName} (to ${t.endsOn})`,
+    description:
+      `${t.kind === "new" ? "Membership dues" : "Membership renewal"} — ${t.memberName} (to ${t.endsOn})` +
+      (t.note ? ` · ${t.note}` : ""),
     counterparty: t.memberName,
     method: t.paid ? t.method : null,
     source: "dues",
@@ -207,7 +217,14 @@ function addTerm(t: NewTerm): void {
 
 function insertMember(
   input: { name: string; email: string; studentId: string | null; phone: string | null },
-  term: { paid: boolean; method: PaymentMethod; endsOn: string | null; createdBy: string | null },
+  term: {
+    paid: boolean;
+    method: PaymentMethod;
+    endsOn: string | null;
+    createdBy: string | null;
+    note?: string;
+    amountCents?: number;
+  },
 ): string {
   const on = today();
   if (get("SELECT 1 FROM members WHERE email = ?", input.email)) {
@@ -239,6 +256,8 @@ function insertMember(
     paid: term.paid,
     method: term.method,
     createdBy: term.createdBy,
+    note: term.note,
+    amountCents: term.amountCents,
   });
   return id;
 }
@@ -257,13 +276,48 @@ export function createMember(input: MemberInput, actor: SessionUser | null): Mem
   });
 }
 
-/** A student signs up on the public page. Dues stay unpaid until staff collect them. */
-export function joinAsMember(input: MemberJoinInput): JoinResult {
-  return tx(() => {
-    const id = insertMember(input, { paid: false, method: "cash", endsOn: null, createdBy: null });
-    const row = getMemberRow(id);
-    return { memberNo: row.member_no, name: row.name, duesOwedCents: row.dues_owed };
+/**
+ * Creates a paid-up member from an application whose payment has been
+ * verified, by a reviewer or by the payment provider. This is where the member
+ * ID is generated. It carries no role check: `reviewApplication` authorises
+ * and calls it inside its transaction, and the online flow calls it only after
+ * verifying the payment with Razorpay, with no staff account (`createdBy` null).
+ */
+export function admitMember(
+  input: { name: string; email: string; studentId: string | null; phone: string | null },
+  payment: { method: PaymentMethod; reference: string; createdBy: string | null; amountCents?: number; note?: string },
+): Member {
+  const id = insertMember(input, {
+    paid: true,
+    method: payment.method,
+    endsOn: null,
+    createdBy: payment.createdBy,
+    note: payment.note ?? `ref ${payment.reference}`,
+    amountCents: payment.amountCents,
   });
+  return toMember(getMemberRow(id));
+}
+
+/** Builds a one-time password-setup link. Callers must have authorised first. */
+export function newSetupLink(memberId: string, createdBy: string | null): SetupLink {
+  const member = getMemberRow(memberId);
+  const { token, expiresAt } = createSetupToken(memberId, createdBy);
+  return {
+    path: `/activate/${token}`,
+    expiresAt,
+    memberNo: member.member_no,
+    name: member.name,
+    email: member.email,
+  };
+}
+
+/**
+ * Staff issue a new setup link, for a member who never set a password or has
+ * forgotten it. Any earlier unused link for the member stops working.
+ */
+export function issueSetupLink(memberId: string, actor: SessionUser | null): SetupLink {
+  const user = requireRole(actor, "admin", "treasurer");
+  return newSetupLink(memberId, user.id);
 }
 
 export function updateMember(
@@ -287,6 +341,19 @@ export function updateMember(
     );
     return toMember(getMemberRow(id));
   });
+}
+
+/**
+ * A member edits their own contact details. Only the phone number and student
+ * ID can change this way; the id always comes from the session.
+ */
+export function updateOwnProfile(
+  memberId: string,
+  input: { phone: string | null; studentId: string | null },
+): MemberDetail {
+  const changed = run("UPDATE members SET phone = ?, student_id = ? WHERE id = ?", input.phone, input.studentId, memberId);
+  if (changed.changes !== 1) throw notFound("Member");
+  return getMember(memberId);
 }
 
 /** Collects every unpaid term for a member. */

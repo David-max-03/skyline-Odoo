@@ -58,6 +58,7 @@ function CheckInDesk() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [working, setWorking] = useState(false);
   const inFlight = useRef(false);
+  const formRef = useRef<HTMLFormElement>(null);
 
   const [openedAt] = useState(() => Date.now());
   const distance = (e: EventSummary) => Math.abs(Date.parse(e.startsAt) - openedAt);
@@ -78,6 +79,16 @@ function CheckInDesk() {
         body: { code: value, eventId, collectPayment, method },
       });
       setResult(outcome);
+      // A buzz the door staff can feel without looking: one for "in", two for anything else.
+      // Ignored by browsers and devices that do not support it.
+      navigator.vibrate?.(outcome.outcome === "checked_in" ? 80 : [60, 70, 60]);
+      // On a keyboard, be ready for the next code straight away.
+      if (window.matchMedia("(pointer: fine)").matches) {
+        const input = formRef.current?.querySelector("input");
+        input?.focus();
+        input?.select(); // typing replaces a code that was refused
+
+      }
       setLog((entries) => [{ at: new Date().toISOString(), result: outcome }, ...entries].slice(0, 8));
       if (outcome.outcome === "checked_in") {
         setCode("");
@@ -142,6 +153,7 @@ function CheckInDesk() {
         <Card className="p-5">
           <QrScanner onScan={(text) => void submit(text)} />
           <form
+            ref={formRef}
             className="mt-5 flex items-start gap-2 border-t border-line pt-5"
             onSubmit={(e: FormEvent) => {
               e.preventDefault();
@@ -166,23 +178,23 @@ function CheckInDesk() {
         </Card>
       </div>
 
-      <div className="order-first space-y-5 lg:order-none lg:col-span-2">
+      <div className="order-first space-y-5 lg:sticky lg:top-6 lg:order-none lg:col-span-2 lg:self-start">
         <div aria-live="assertive">
           {result && look ? (
-            <div key={log[0]?.at} className={cn("animate-rise rounded-card border-2 p-5", look.panel)}>
-              <div className="flex items-start gap-4">
-                <span className={cn("flex size-12 shrink-0 items-center justify-center rounded-full", look.iconBox)}>
-                  <look.icon className="size-7" aria-hidden />
-                </span>
+            <div key={log[0]?.at} className={cn("animate-pop overflow-hidden rounded-card border-2 shadow-raised", look.panel)}>
+              {/* The verdict: readable at arm's length, and never by colour alone. */}
+              <div className={cn("flex items-center gap-4 px-5 py-5", look.iconBox)}>
+                <look.icon className="size-11 shrink-0" strokeWidth={2.25} aria-hidden />
                 <div className="min-w-0">
-                  <p className="font-display text-xl font-extrabold text-ink">{look.title}</p>
-                  <p className="text-sm text-body">{result.message}</p>
+                  <p className="font-display text-[1.75rem] font-extrabold leading-tight">{look.title}</p>
+                  <p className="text-sm font-medium opacity-90">{result.message}</p>
                 </div>
               </div>
+              <div className="p-5">
               {result.ticket && (
-                <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 border-t border-ink/10 pt-4 text-sm">
-                  <dt className="text-muted">Name</dt>
-                  <dd className="font-semibold text-ink">{result.ticket.attendeeName}</dd>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+                  <dt className="sr-only">Name</dt>
+                  <dd className="col-span-2 mb-1 font-display text-xl font-bold text-ink">{result.ticket.attendeeName}</dd>
                   <dt className="text-muted">Ticket</dt>
                   <dd className="font-mono text-[0.8125rem] text-ink">{result.ticket.code}</dd>
                   <dt className="text-muted">Membership</dt>
@@ -217,6 +229,8 @@ function CheckInDesk() {
                   </div>
                 </div>
               )}
+              {!result.ticket && <p className="text-sm text-body">Ask to see the ticket again, or look the person up under the event&rsquo;s registrations.</p>}
+              </div>
             </div>
           ) : (
             <Card>

@@ -13,14 +13,15 @@ import {
   Card,
   EmptyState,
   ErrorState,
-  LoadingBlock,
   Meter,
   PageHeader,
   Segmented,
   Table,
+  TableSkeleton,
   Td,
   Th,
 } from "@/components/ui";
+import { DateBlock } from "@/components/domain";
 import { useApi } from "@/lib/api-client";
 import type { EventSummary } from "@/lib/contracts";
 import { formatDateTime } from "@/lib/dates";
@@ -87,7 +88,7 @@ export default function EventsPage() {
         {error && !data ? (
           <ErrorState message={error.message} onRetry={reload} />
         ) : !data ? (
-          <LoadingBlock label="Loading events" />
+          <TableSkeleton label="Loading events" />
         ) : visible.length === 0 ? (
           <EmptyState
             icon={CalendarDays}
@@ -102,7 +103,7 @@ export default function EventsPage() {
             }
           />
         ) : (
-          <Table>
+          <Table stack>
             <thead>
               <tr>
                 <Th>Event</Th>
@@ -114,24 +115,29 @@ export default function EventsPage() {
             </thead>
             <tbody>
               {visible.map((e) => (
-                <tr key={e.id} className="hover:bg-sunken/50">
-                  <Td>
-                    <Link href={`/org/events/${e.id}`} className="font-semibold text-ink hover:text-brand hover:underline">
-                      {e.title}
-                    </Link>
-                    <div className="mt-0.5 text-[0.8125rem] text-muted">{formatDateTime(e.startsAt)}</div>
-                    <div className="flex items-center gap-1 text-[0.8125rem] text-muted">
-                      <MapPin className="size-3.5 shrink-0" aria-hidden />
-                      {e.venue}
+                <tr key={e.id} className="transition-colors hover:bg-sunken/50">
+                  <Td layout="lead">
+                    <div className="flex items-start gap-3.5">
+                      <DateBlock iso={e.startsAt} muted={e.phase === "past" || e.status !== "published"} />
+                      <div className="min-w-0">
+                        <Link href={`/org/events/${e.id}`} className="rounded font-semibold text-ink hover:text-brand hover:underline">
+                          {e.title}
+                        </Link>
+                        <div className="mt-0.5 text-[0.8125rem] text-muted">{formatDateTime(e.startsAt)}</div>
+                        <div className="flex items-center gap-1 text-[0.8125rem] text-muted">
+                          <MapPin className="size-3.5 shrink-0" aria-hidden />
+                          {e.venue}
+                        </div>
+                      </div>
                     </div>
                   </Td>
-                  <Td>
+                  <Td label="Status">
                     <EventStatusBadge status={e.status} phase={e.phase} />
                   </Td>
-                  <Td className="min-w-36">
+                  <Td label="Seats" layout="block" className="sm:min-w-36">
                     <div className="num mb-1 text-[0.8125rem]">
                       <span className="font-medium text-ink">{e.stats.registered}</span> / {e.capacity}
-                      <span className="text-muted"> · {e.stats.remaining} left</span>
+                      {e.phase !== "past" && e.status !== "cancelled" && <span className="text-muted"> · {e.stats.remaining} left</span>}
                     </div>
                     <Meter
                       value={e.stats.registered}
@@ -140,16 +146,18 @@ export default function EventsPage() {
                       tone={e.stats.remaining === 0 ? "bad" : e.stats.remaining <= e.capacity * 0.1 ? "warn" : "brand"}
                     />
                   </Td>
-                  <Td align="right">
-                    {e.priceCents === 0 ? <span className="text-muted">Free</span> : <Money cents={e.priceCents} />}
-                    {e.memberPriceCents !== e.priceCents && (
-                      <div className="text-xs text-muted">
-                        members <Money cents={e.memberPriceCents} />
-                      </div>
-                    )}
+                  <Td label="Price" align="right">
+                    <div>
+                      {e.priceCents === 0 ? <span className="text-muted">Free</span> : <Money cents={e.priceCents} />}
+                      {e.memberPriceCents !== e.priceCents && (
+                        <div className="text-xs text-muted">
+                          members <Money cents={e.memberPriceCents} />
+                        </div>
+                      )}
+                    </div>
                   </Td>
-                  <Td align="right">
-                    <Money cents={e.finance.netCents} signed colored className="font-medium" />
+                  <Td label="Result" align="right">
+                    <Money cents={e.finance.netCents} signed colored className="font-semibold" />
                   </Td>
                 </tr>
               ))}

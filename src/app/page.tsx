@@ -4,7 +4,7 @@ import Link from "next/link";
 import { ArrowRight, CalendarDays, MapPin, Megaphone, Shirt, UserPlus } from "lucide-react";
 import { Money } from "@/components/domain";
 import { PublicShell } from "@/components/public-shell";
-import { Badge, Card, EmptyState, ErrorState, LinkButton, Skeleton } from "@/components/ui";
+import { Badge, Card, EmptyState, ErrorState, LinkButton, Skeleton, cn } from "@/components/ui";
 import { useApi } from "@/lib/api-client";
 import { SETTINGS, type PublicAnnouncement, type PublicEvent } from "@/lib/contracts";
 import { formatDateTime } from "@/lib/dates";
@@ -16,7 +16,8 @@ export default function HomePage() {
 
   return (
     <PublicShell>
-      <section className="rounded-card bg-night px-6 py-10 sm:px-10 sm:py-14">
+      <section className="grid items-center gap-8 rounded-card bg-night px-6 py-10 sm:px-10 sm:py-14 lg:grid-cols-[minmax(0,1fr)_19rem]">
+        <div>
         <p className="text-sm font-semibold uppercase tracking-wider text-accent">{SETTINGS.orgName}</p>
         <h1 className="mt-3 max-w-2xl text-3xl font-extrabold !text-white sm:text-[2.6rem] sm:leading-[1.1]">
           Events, membership and merch, all in one place.
@@ -32,6 +33,39 @@ export default function HomePage() {
             Become a member
           </LinkButton>
         </div>
+        </div>
+
+        {/* The next real event, shown as a ticket. Hidden until events load, and when there are none. */}
+        {events.data?.[0] && (
+          <Link
+            href={`/events/${events.data[0].id}`}
+            className="group hidden overflow-hidden rounded-card bg-surface shadow-raised transition-transform hover:-translate-y-0.5 lg:block"
+          >
+            <div className="border-b-2 border-dashed border-line px-5 pb-4 pt-5">
+              <p className="text-xs font-semibold uppercase tracking-wider text-brand">Next up</p>
+              <p className="mt-1 font-display text-lg font-bold leading-snug text-ink group-hover:text-brand">{events.data[0].title}</p>
+              <p className="mt-1.5 text-[0.8125rem] text-muted">{formatDateTime(events.data[0].startsAt)}</p>
+              <p className="flex items-center gap-1 text-[0.8125rem] text-muted">
+                <MapPin className="size-3.5 shrink-0" aria-hidden />
+                {events.data[0].venue}
+              </p>
+            </div>
+            <div className="flex items-center justify-between gap-3 px-5 py-4">
+              <span className="text-sm">
+                <span className="font-display font-bold text-ink">
+                  {events.data[0].priceCents === 0 ? "Free" : <Money cents={events.data[0].priceCents} />}
+                </span>
+                <span className="text-muted">
+                  {" "}
+                  · {events.data[0].closedReason === "sold_out" ? "sold out" : `${events.data[0].remaining} seats left`}
+                </span>
+              </span>
+              <span className="inline-flex items-center gap-1 text-sm font-semibold text-brand">
+                Get a ticket <ArrowRight className="size-4" aria-hidden />
+              </span>
+            </div>
+          </Link>
+        )}
       </section>
 
       {latest && (
@@ -74,7 +108,7 @@ export default function HomePage() {
             <EmptyState icon={CalendarDays} title="Nothing scheduled right now" description="Check back soon, or read the news board for updates." />
           </Card>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className={cn("grid gap-4 sm:grid-cols-2", events.data.length >= 3 && "lg:grid-cols-3")}>
             {events.data.slice(0, 3).map((event) => (
               <Link
                 key={event.id}

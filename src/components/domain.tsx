@@ -6,10 +6,9 @@
  * wording or tone for the whole app.
  */
 
-import { Check, CircleAlert, Clock, Lightbulb, type LucideIcon } from "lucide-react";
+import { Check, Clock, type LucideIcon } from "lucide-react";
 import {
   TASK_STATUS_LABELS,
-  type AssistantFactKind,
   type EventPhase,
   type EventStatus,
   type MemberStatus,
@@ -116,21 +115,23 @@ export function OrderStatusBadge({ status }: { status: OrderStatus }) {
   return <Badge tone="brand">To hand over</Badge>;
 }
 
-const FACT: Record<AssistantFactKind, { label: string; tone: Tone; icon: LucideIcon; title: string }> = {
-  actual: { label: "Actual", tone: "ok", icon: Check, title: "Read directly from stored records" },
-  estimate: { label: "Estimate", tone: "warn", icon: CircleAlert, title: "Calculated from records plus a stated assumption" },
-  recommendation: { label: "Suggestion", tone: "brand", icon: Lightbulb, title: "A suggested action, not a fact" },
-};
-
-export function FactKindBadge({ kind }: { kind: AssistantFactKind }) {
-  const f = FACT[kind];
+/** A calendar tile: month over day, in the viewer's timezone. Decorative; the full date is always nearby in text. */
+export function DateBlock({ iso, muted = false }: { iso: string; muted?: boolean }) {
+  const date = new Date(iso);
   return (
-    <span title={f.title}>
-      <Badge tone={f.tone} icon={f.icon}>
-        {f.label}
-      </Badge>
+    <span
+      aria-hidden
+      className={cn(
+        "flex size-12 shrink-0 flex-col items-center justify-center rounded-control border leading-none",
+        muted ? "border-line bg-sunken text-muted" : "border-brand-line bg-brand-soft text-brand-deep",
+      )}
+    >
+      <span className="text-[0.625rem] font-bold uppercase tracking-wider">
+        {new Intl.DateTimeFormat("en", { month: "short" }).format(date)}
+      </span>
+      <span className="num mt-0.5 font-display text-lg font-extrabold">{date.getDate()}</span>
     </span>
   );
 }
 
-export const percent = (ratio: number | null) => (ratio === null ? "—" : `${Math.round(ratio * 100)}%`);
+export const percent =(ratio: number | null) => (ratio === null ? "—" : `${Math.round(ratio * 100)}%`);

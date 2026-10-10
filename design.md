@@ -128,8 +128,8 @@ All in `src/components`. Reuse before inventing.
   finance statement (what is left). One per page.
 - **Statement.** Collected − Paid out = What is left, read left to right, with pending
   amounts in a separate row beneath. Pending is never mixed into the balance.
-- **Actual / Estimate / Suggestion tags.** Any figure that depends on an assumption
-  carries an amber "Estimate" tag. The assistant tags every fact.
+- **Estimate tags.** Any figure that depends on an assumption carries an amber
+  "Estimate" tag.
 - **Verdict panel.** Check-in results use a solid colour band with a large icon and
   title: green admitted, amber needs action, red refused.
 - **Date tile.** Month over day beside an event title. Decorative; the full date is
@@ -171,7 +171,7 @@ slightly when pressed. Everything is disabled under `prefers-reduced-motion`.
 - Every input has a visible label; errors are tied to their field.
 - Icon-only buttons have an `aria-label`. Decorative icons are `aria-hidden`.
 - Dialogs trap focus and return it to the control that opened them.
-- Live results (check-in verdict, toasts, assistant answers) are announced.
+- Live results (check-in verdict, toasts) are announced.
 - Stacked tables keep table roles so rows and columns stay navigable.
 - No emoji as icons. Icons are Lucide SVGs.
 

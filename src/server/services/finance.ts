@@ -2,6 +2,7 @@ import type {
   EventFinance,
   FinanceSummary,
   FinanceTotals,
+  MemberPayment,
   PaymentMethod,
   SessionUser,
   Transaction,
@@ -44,13 +45,15 @@ interface TxRow {
   void_reason: string | null;
   event_title: string | null;
   created_by_name: string | null;
+  claim_id: string | null;
 }
 
 const SELECT = `
-  SELECT t.*, e.title AS event_title, u.name AS created_by_name
+  SELECT t.*, e.title AS event_title, u.name AS created_by_name, c.id AS claim_id
   FROM transactions t
   LEFT JOIN events e ON e.id = t.event_id
-  LEFT JOIN users u ON u.id = t.created_by`;
+  LEFT JOIN users u ON u.id = t.created_by
+  LEFT JOIN expense_claims c ON c.transaction_id = t.id`;
 
 function toTransaction(r: TxRow): Transaction {
   return {
@@ -69,6 +72,7 @@ function toTransaction(r: TxRow): Transaction {
     ticketId: r.ticket_id,
     memberId: r.member_id,
     orderId: r.order_id,
+    claimId: r.claim_id,
     createdByName: r.created_by_name,
     createdAt: r.created_at,
     settledAt: r.settled_at,
@@ -155,6 +159,9 @@ function applySettlement(row: TxRow, method: PaymentMethod | null): void {
   if (row.source === "dues" && row.period_id) {
     run("UPDATE membership_periods SET paid_at = ? WHERE id = ? AND paid_at IS NULL", ts, row.period_id);
   }
+  // Paying the ledger entry of an approved claim is what marks the claim paid,
+  // whichever screen the payment was recorded from.
+  run("UPDATE expense_claims SET status = 'paid' WHERE transaction_id = ? AND status = 'approved'", row.id);
 }
 
 type Link = { ticketId: string } | { orderId: string } | { periodId: string };
@@ -208,11 +215,12 @@ export function getTransaction(id: string): Transaction {
 }
 
 export function createTransaction(input: TransactionInput, actor: SessionUser | null): Transaction {
-  const user = requireRole(actor, "admin", "treasurer", "organizer");
-  // Organizers can ask to be reimbursed; they cannot move or receive money.
-  if (user.role === "organizer" && (input.type !== "expense" || input.status !== "pending")) {
-    throw forbidden("Organizers can only file expense claims for the treasurer to approve.");
+  // Only finance staff write to the ledger by hand. Everyone else asks to be
+  // reimbursed through an expense claim, which needs a receipt photo.
+  if (actor && actor.role === "organizer") {
+    throw forbidden("File an expense claim with a photo of the receipt; the treasurer records it in the ledger.");
   }
+  const user = requireRole(actor, "admin", "treasurer");
   assertEventExists(input.eventId);
   const id = recordTransaction({ ...input, source: "manual", createdBy: user.id });
   return getTransaction(id);
@@ -228,10 +236,10 @@ export function updateTransaction(
     const row = get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
     if (!row) throw notFound("Transaction");
     if (row.voided_at) throw conflict("voided", "A voided entry cannot be edited.");
-    if (row.source !== "manual") {
+    if (row.source !== "manual" || row.claim_id) {
       throw conflict(
         "linked_entry",
-        "This entry was created by a ticket, order or membership and follows that record.",
+        "This entry was created by a ticket, order, membership or expense claim and follows that record.",
       );
     }
     assertEventExists(input.eventId);
@@ -279,10 +287,10 @@ export function voidTransaction(id: string, reason: string, actor: SessionUser |
     const row = get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
     if (!row) throw notFound("Transaction");
     if (row.voided_at) throw conflict("voided", "This entry is already voided.");
-    if (row.source !== "manual" && row.source !== "refund") {
+    if ((row.source !== "manual" && row.source !== "refund") || row.claim_id) {
       throw conflict(
         "linked_entry",
-        "This entry belongs to a ticket, order or membership. Cancel that record instead.",
+        "This entry belongs to a ticket, order, membership or expense claim. Change that record instead.",
       );
     }
     run("UPDATE transactions SET voided_at = ?, void_reason = ? WHERE id = ?", nowIso(), reason, id);
@@ -315,6 +323,33 @@ export function listTransactions(filter: TransactionFilter = {}): Transaction[] 
   const sql = `${SELECT} ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
     ORDER BY t.occurred_on DESC, t.created_at DESC LIMIT 1000`;
   return all<TxRow>(sql, ...params).map(toTransaction);
+}
+
+/**
+ * The ledger rows that concern one member: their dues, tickets and orders
+ * (matched by member id, or by their email on the ticket or order) and
+ * repayments of their claims. Read-only, and limited to fields about them.
+ */
+export function listMemberPayments(memberId: string): MemberPayment[] {
+  return all<TxRow>(
+    `${SELECT}
+     WHERE t.voided_at IS NULL AND (
+       t.member_id = ?1
+       OR t.ticket_id IN (SELECT k.id FROM tickets k JOIN members m ON m.email = k.attendee_email WHERE m.id = ?1)
+       OR t.order_id IN (SELECT o.id FROM orders o JOIN members m ON m.email = o.buyer_email WHERE m.id = ?1)
+       OR c.claimant_member_id = ?1
+     )
+     ORDER BY t.occurred_on DESC, t.created_at DESC LIMIT 200`,
+    memberId,
+  ).map((r) => ({
+    id: r.id,
+    description: r.description,
+    type: r.type,
+    amountCents: r.amount_cents,
+    status: r.status,
+    occurredOn: r.occurred_on,
+    method: r.method,
+  }));
 }
 
 // ---------------------------------------------------------------------------

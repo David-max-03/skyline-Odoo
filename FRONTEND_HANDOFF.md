@@ -55,17 +55,44 @@ validated for colour-blind separation; re-validate if you change them.
 | `TextField`, `SelectField`, `TextAreaField`, `CheckboxField` | `label`, `error`, `hint`, `optional`, `prefix`; label and error are wired for screen readers |
 | `FormError`, `Notice` | Form-level error; inline message with `tone` |
 | `Badge` | `tone`: neutral, brand, ok, warn, bad · `icon` |
-| `Stat`, `Meter` | Headline figure; proportion bar (always pair with the numbers) |
-| `Table`, `Th`, `Td` | Scrolls horizontally on small screens |
-| `Segmented` | Filter group with optional counts |
-| `EmptyState`, `ErrorState`, `LoadingBlock`, `Skeleton` | The three non-happy states |
+| `Stat`, `Meter` | Headline figure; proportion bar (always pair with the numbers). `Meter size`: sm, md |
+| `Table`, `Th`, `Td` | Scrolls horizontally by default. `<Table stack>` turns each row into a labelled card below 640px (see below) |
+| `Segmented` | Filter group with optional counts; scrolls on one line on phones |
+| `EmptyState`, `ErrorState` | Nothing to show; failed to load (with retry) |
+| `TableSkeleton`, `StatSkeleton`, `Skeleton`, `LoadingBlock` | Loading placeholders shaped like the content they stand in for |
+
+**Stacked tables.** Any table a phone user needs should use `stack`. Give each cell
+its column name and say how it should sit in the card:
+
+```tsx
+<Table stack>
+  <thead>…</thead>
+  <tbody>
+    <tr>
+      <Td layout="lead">Title and subtitle; shown first, full width, no label</Td>
+      <Td label="Status"><Badge>…</Badge></Td>
+      <Td label="Seats" layout="block">Label above, content full width (meters)</Td>
+      <Td label="Amount" align="right">…</Td>
+      <Td layout="actions"><div className="flex gap-1">buttons</div></Td>
+    </tr>
+  </tbody>
+</Table>
+```
+
+A cell with more than one child should wrap them in a single element so they stay
+together on the right. Empty cells are hidden. The layout rules are the `.stack-table`
+block in `globals.css`; `Table` adds ARIA table roles so screen readers keep row and
+column navigation when the display changes.
 
 `overlay.tsx` — `Dialog` (native `<dialog>`), `DialogActions`, `ConfirmDialog`,
 `ToastProvider` / `useToast()`.
 `domain.tsx` — Skyline vocabulary in one place: `Money`, `EventStatusBadge`,
 `PaymentBadge`, `TransactionStatusBadge`, `MemberStatusBadge`, `TaskStatusBadge`,
-`OrderStatusBadge`, `FactKindBadge`. Change a label or tone here and it changes everywhere.
-`org-shell.tsx` — staff sidebar and mobile menu. Add a page to `ORG_NAV` to list it.
+`OrderStatusBadge`, `FactKindBadge`, `DateBlock` (calendar tile). Change a label or tone
+here and it changes everywhere.
+`org-shell.tsx` — staff sidebar on desktop; on phones a bottom tab bar (`TABS`: Home,
+Events, Check-in, Finance) plus "More", which opens the full menu. Add a page to
+`ORG_NAV` and it appears in the sidebar and under More. Keep `TABS` to four.
 `public-shell.tsx` — public header, footer and the `Logo`.
 `charts.tsx` — `CashflowChart`. `qr-scanner.tsx` — `QrScanner({ onScan })`.
 `event-form.tsx`, `transaction-form.tsx` — the two forms used on more than one page.
@@ -78,8 +105,22 @@ validated for colour-blind separation; re-validate if you change them.
 | `/` | `app/page.tsx` | public events, announcements | — |
 | `/events`, `/events/[id]` | `app/(public)/events/…` | public events | register |
 | `/t/[code]` | `app/(public)/t/[code]/page.tsx` | public ticket (polls every 20 s) | — |
-| `/shop`, `/join`, `/news` | `app/(public)/…` | products, announcements | order, join |
-| `/login` | `app/login/page.tsx` | `auth/me` | login |
+| `/shop` | `app/(public)/shop/page.tsx` | public products | — (adds to the browser cart) |
+| `/shop/[id]` | `app/(public)/shop/[id]/page.tsx` | one public product | — (adds to the browser cart) |
+| `/shop/cart` | `app/(public)/shop/cart/page.tsx` | public products, `auth/me` | `public/checkout`, or `me/checkout` for a signed-in member |
+| `/join` | `app/(public)/join/page.tsx` | `public/membership` | `public/applications` (form upload), `public/applications/status` |
+| `/news` | `app/(public)/news/page.tsx` | public announcements | — |
+| `/login` | `app/login/page.tsx` | `auth/me` | login (members go to `/member`, staff to `/org`) |
+| `/activate/[token]` | `app/activate/[token]/page.tsx` | `auth/setup/check` | `auth/setup` |
+| `/member` | `app/member/page.tsx` | `me` | — |
+| `/member/membership` | `app/member/membership/page.tsx` | `me`, `me/payments` | — |
+| `/member/events` | `app/member/events/page.tsx` | `me`, public events | `me/events/:id/register`, `me/tickets/:code/cancel` |
+| `/member/orders` | `app/member/orders/page.tsx` | `me/orders` | — |
+| `/member/tasks` | `app/member/tasks/page.tsx` | `me/tasks` | `me/tasks/:id` |
+| `/member/claims` | `app/member/claims/page.tsx` | `claims` | `claims` (form upload) |
+| `/member/announcements` | `app/member/announcements/page.tsx` | `me/announcements` | — |
+| `/member/profile` | `app/member/profile/page.tsx` | `me` | `me` (PATCH), `me/password` |
+| `/org/claims` | `app/org/claims/page.tsx` | `claims` | `claims` (form upload), `claims/:id` |
 | `/org` | `app/org/page.tsx` | `dashboard` | — |
 | `/org/events`, `/org/events/[id]` | `app/org/events/…` | events, transactions | events, status, registrations, tickets, transactions |
 | `/org/check-in` | `app/org/check-in/page.tsx` | events | check-in |
@@ -88,7 +129,20 @@ validated for colour-blind separation; re-validate if you change them.
 | `/org/tasks` | `app/org/tasks/page.tsx` | tasks, events | tasks |
 | `/org/announcements` | `app/org/announcements/page.tsx` | announcements, members | announcements |
 | `/org/merch` | `app/org/merch/page.tsx` | products, orders | products, orders |
-| `/org/assistant` | `app/org/assistant/page.tsx` | assistant | assistant |
+
+Three shells: `PublicShell` (public pages and the shop, with the cart link), `MemberShell`
+(`/member/*`, nav in `MEMBER_NAV`) and `OrgShell` (`/org/*`, nav in `ORG_NAV`). Each area's
+layout sends the wrong kind of account to its own area; the API refuses it regardless.
+
+Shared pieces added for members and the shop: `components/claims-ui.tsx` (claim form with
+photo capture, list and review), `components/applications-panel.tsx` (application review
+and the one-time setup link), `components/product-editor.tsx`, `components/shop-ui.tsx`
+(photo tile, availability badge, quantity stepper, cart link) and `lib/cart.ts` (the
+cart, kept in the browser; it holds sizes and quantities only, never a price the server
+trusts). Send files with `api(path, { method: "POST", form })`.
+
+Task cards show exactly one button, taken from `TASK_NEXT_ACTION`: Start, Done or Reopen.
+Do not add a status picker; the server rejects any other transition.
 
 ## Talking to the server
 

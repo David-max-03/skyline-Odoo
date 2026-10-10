@@ -203,6 +203,51 @@ export function registerForEvent(
   });
 }
 
+/**
+ * A signed-in member registers themselves. The name and email come from their
+ * member record, not from the request, and the member price applies only when
+ * a paid term covers today. Everything else (capacity, one ticket per person,
+ * the pending charge) is the same code path as any other registration, so a
+ * paid event's ticket stays unpaid until staff record the payment.
+ */
+export function registerMember(eventId: string, memberId: string): Ticket {
+  const member = get<{ name: string; email: string; student_id: string | null; member_no: string }>(
+    "SELECT name, email, student_id, member_no FROM members WHERE id = ?",
+    memberId,
+  );
+  if (!member) throw notFound("Member");
+  const active = findActiveMember(member.email, member.member_no);
+  return registerForEvent(eventId, {
+    name: member.name,
+    email: member.email,
+    studentId: member.student_id,
+    memberNo: active ? member.member_no : null,
+  });
+}
+
+/**
+ * A member gives up their own seat. Allowed only for a ticket that is theirs,
+ * has not been used, and has not been paid for: a paid ticket needs a refund
+ * recorded, which is the committee's job. Someone else's ticket looks missing.
+ */
+export function cancelOwnTicket(rawCode: string, memberId: string): Ticket {
+  return tx(() => {
+    const member = get<{ email: string }>("SELECT email FROM members WHERE id = ?", memberId);
+    const row = findRow(rawCode);
+    if (!member || !row || (row.member_id !== memberId && row.attendee_email.toLowerCase() !== member.email.toLowerCase())) {
+      throw notFound("Ticket");
+    }
+    if (row.status === "cancelled") throw conflict("ticket_cancelled", "This ticket is already cancelled.");
+    if (row.checked_in_at) throw conflict("already_checked_in", "This ticket was already used to enter the event.");
+    if (row.payment_status === "paid") {
+      throw conflict("paid_ticket", "This ticket is paid. Ask the committee to cancel it so your refund is recorded.");
+    }
+    run("UPDATE tickets SET status = 'cancelled' WHERE id = ? AND status = 'valid' AND checked_in_at IS NULL", row.id);
+    voidPendingFor({ ticketId: row.id }, "Cancelled by the member");
+    return getTicketById(row.id);
+  });
+}
+
 function getTicketById(id: string): Ticket {
   const row = get<TicketRow>(`${SELECT} WHERE t.id = ?`, id);
   if (!row) throw notFound("Ticket");

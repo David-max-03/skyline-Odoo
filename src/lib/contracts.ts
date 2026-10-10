@@ -87,24 +87,99 @@ const idRef = z
 export const ROLES = ["admin", "treasurer", "organizer"] as const;
 export type Role = (typeof ROLES)[number];
 
-export const ROLE_LABELS: Record<Role, string> = {
+/**
+ * Staff hold one of the three roles above. A member account is a separate
+ * kind of sign-in with the role "member": it can never appear in a staff role
+ * list, so no staff permission can be granted to it by accident.
+ */
+export type AccountRole = Role | "member";
+
+export const ROLE_LABELS: Record<AccountRole, string> = {
   admin: "President (admin)",
   treasurer: "Treasurer",
   organizer: "Event organizer",
+  member: "Member",
 };
 
 export interface SessionUser {
+  /** A staff user id, or the member id for a member account. */
   id: string;
   name: string;
   email: string;
-  role: Role;
+  role: AccountRole;
+  /** Set only for member accounts. */
+  memberId: string | null;
+  memberNo: string | null;
 }
 
+export const isStaff = (user: SessionUser | null | undefined): boolean =>
+  !!user && user.role !== "member";
+
 export const loginSchema = z.object({
-  email,
+  /** Staff sign in with their email; members with their email or member ID. */
+  email: z
+    .string({ error: "Enter your email or member ID" })
+    .trim()
+    .min(1, "Enter your email or member ID")
+    .max(200, "That is too long"),
   password: z.string({ error: "Password is required" }).min(1, "Password is required").max(200),
 });
 export type LoginInput = z.infer<typeof loginSchema>;
+
+export const MEMBER_PASSWORD_MIN = 10;
+
+export const setupTokenSchema = z.object({
+  token: z.string({ error: "This link is incomplete" }).min(20, "This link is incomplete").max(200),
+});
+
+export const passwordSetupSchema = setupTokenSchema.extend({
+  password: z
+    .string({ error: "Choose a password" })
+    .min(MEMBER_PASSWORD_MIN, `Use at least ${MEMBER_PASSWORD_MIN} characters`)
+    .max(200, "Password is too long"),
+});
+
+export const passwordChangeSchema = z.object({
+  currentPassword: z.string({ error: "Enter your current password" }).min(1, "Enter your current password").max(200),
+  newPassword: z
+    .string({ error: "Choose a new password" })
+    .min(MEMBER_PASSWORD_MIN, `Use at least ${MEMBER_PASSWORD_MIN} characters`)
+    .max(200, "Password is too long"),
+});
+
+/** The only fields a member may change about themselves. Name, email and member ID belong to the committee. */
+export const memberProfileSchema = z.object({
+  phone: optionalText(30),
+  studentId: optionalText(40),
+});
+
+/** A line from the ledger that concerns the signed-in member: dues, tickets, orders, claim repayments. */
+export interface MemberPayment {
+  id: string;
+  description: string;
+  /** "income" is money the member pays the club; "expense" is money the club pays the member. */
+  type: "income" | "expense";
+  amountCents: number;
+  status: "settled" | "pending";
+  occurredOn: string;
+  method: string | null;
+}
+
+/** What the holder of a valid setup link is shown before choosing a password. */
+export interface SetupTokenInfo {
+  memberNo: string;
+  name: string;
+  expiresAt: string;
+}
+
+/** A one-time password-setup link. The path is shown once, to the staff member who issued it. */
+export interface SetupLink {
+  path: string;
+  expiresAt: string;
+  memberNo: string;
+  name: string;
+  email: string;
+}
 
 /** What each role may do. The server enforces this; the UI only reads it to hide controls. */
 export const CAN = {
@@ -120,7 +195,7 @@ export const CAN = {
 } as const satisfies Record<string, readonly Role[]>;
 
 export function can(user: SessionUser | null | undefined, action: keyof typeof CAN): boolean {
-  return !!user && (CAN[action] as readonly Role[]).includes(user.role);
+  return !!user && (CAN[action] as readonly string[]).includes(user.role);
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +525,88 @@ export const transactionActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("void"), reason: text(3, 200, "Reason") }),
 ]);
 
+// --- Expense claims -----------------------------------------------------------
+
+/** What a claim may be filed under. Refunds and stock purchases are not claims. */
+export const CLAIM_CATEGORIES = ["supplies", "catering", "marketing", "equipment", "venue", "other_expense"] as const;
+export type ClaimCategory = (typeof CLAIM_CATEGORIES)[number];
+
+/**
+ * Sent as form fields, with the receipt photo in a file field named `evidence`.
+ * The photo is required; the server refuses a claim without one.
+ */
+export const claimInputSchema = z.object({
+  title: text(3, 120, "What you bought"),
+  // Form fields arrive as text.
+  amountCents: z.coerce
+    .number({ error: "Amount must be a number" })
+    .int("Amount must be a whole number of minor units")
+    .min(1, "Amount must be greater than zero")
+    .max(MAX_CENTS, "Amount is too large"),
+  spentOn: ymd("Expense date"),
+  category: z.enum(CLAIM_CATEGORIES, { error: "Choose a category" }),
+  justification: text(10, 600, "Why it was needed"),
+  notes: optionalText(600),
+  eventId: idRef,
+});
+export type ClaimInput = z.infer<typeof claimInputSchema>;
+
+export const CLAIM_STATUSES = ["submitted", "under_review", "approved", "rejected", "paid"] as const;
+export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
+export const CLAIM_STATUS_LABELS: Record<ClaimStatus, string> = {
+  submitted: "Submitted",
+  under_review: "Under review",
+  approved: "Approved, to be paid",
+  rejected: "Rejected",
+  paid: "Paid",
+};
+
+export const claimReviewSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("start_review") }),
+  z.object({ action: z.literal("approve"), note: optionalText(300) }),
+  z.object({ action: z.literal("reject"), reason: text(3, 300, "Reason") }),
+  z.object({ action: z.literal("pay"), method: z.enum(PAYMENT_METHODS, { error: "Choose how it was paid" }) }),
+]);
+export type ClaimReviewInput = z.infer<typeof claimReviewSchema>;
+
+export interface ExpenseClaim {
+  id: string;
+  code: string;
+  claimantName: string;
+  /** "member" or "staff": who filed it. */
+  claimantKind: "member" | "staff";
+  /** True when the signed-in account filed this claim. Nobody reviews their own. */
+  isMine: boolean;
+  title: string;
+  justification: string;
+  notes: string | null;
+  category: ClaimCategory;
+  amountCents: number;
+  spentOn: string;
+  eventId: string | null;
+  eventTitle: string | null;
+  /** Fetch the photo from `/api/files/:id`. Reviewers and the claimant only. */
+  evidenceFileId: string;
+  status: ClaimStatus;
+  reviewNote: string | null;
+  reviewedByName: string | null;
+  reviewedAt: string | null;
+  /** The ledger entry created on approval. */
+  transactionId: string | null;
+  createdAt: string;
+}
+
+/** Whether the signed-in account may file claims, and why not if it may not. */
+export interface ClaimAccess {
+  canSubmit: boolean;
+  canReview: boolean;
+  reason: string | null;
+}
+
+export interface ClaimList extends ClaimAccess {
+  claims: ExpenseClaim[];
+}
+
 /** Where a transaction came from. Only `manual` rows can be edited or voided by hand. */
 export type TransactionSource = "manual" | "ticket" | "dues" | "order" | "refund";
 
@@ -469,6 +626,8 @@ export interface Transaction {
   ticketId: string | null;
   memberId: string | null;
   orderId: string | null;
+  /** Set when the entry was created by approving an expense claim. It then follows the claim. */
+  claimId: string | null;
   createdByName: string | null;
   createdAt: string;
   settledAt: string | null;
@@ -519,14 +678,6 @@ export const memberInputSchema = z.object({
 });
 export type MemberInput = z.infer<typeof memberInputSchema>;
 
-export const memberJoinSchema = memberInputSchema.pick({
-  name: true,
-  email: true,
-  studentId: true,
-  phone: true,
-});
-export type MemberJoinInput = z.infer<typeof memberJoinSchema>;
-
 export const memberUpdateSchema = memberInputSchema.pick({
   name: true,
   email: true,
@@ -569,6 +720,8 @@ export interface Member {
   status: MemberStatus;
   /** Days until the paid term ends; negative once lapsed; null if never paid. */
   daysToExpiry: number | null;
+  /** True once the member has set a password and can sign in. */
+  hasAccount: boolean;
   createdAt: string;
 }
 
@@ -606,11 +759,247 @@ export interface MemberDetail extends Member {
   }[];
 }
 
-/** Returned to a student who signs up on the public page. */
-export interface JoinResult {
-  memberNo: string;
+// ---------------------------------------------------------------------------
+// Membership applications
+// ---------------------------------------------------------------------------
+
+/** How an applicant says they paid. A subset of PAYMENT_METHODS. */
+export const APPLICATION_METHODS = ["upi", "bank", "cash"] as const;
+export type ApplicationMethod = (typeof APPLICATION_METHODS)[number];
+export const APPLICATION_METHOD_LABELS: Record<ApplicationMethod, string> = {
+  upi: "UPI",
+  bank: "Bank transfer",
+  cash: "Cash to a committee member",
+};
+
+/** Sent as form fields, with the payment screenshot in a file field named `evidence`. */
+export const applicationInputSchema = z.object({
+  name: text(2, 100, "Name"),
+  email,
+  studentId: optionalText(40),
+  phone: optionalText(30),
+  paymentMethod: z.enum(APPLICATION_METHODS, { error: "Choose how you paid" }),
+  /** UPI or bank reference number, or for cash, who took the money. */
+  paymentReference: text(4, 80, "Payment reference"),
+});
+export type ApplicationInput = z.infer<typeof applicationInputSchema>;
+
+export type ApplicationStatus = "pending" | "approved" | "rejected";
+
+/** What an applicant gets back. Nothing here says the payment was verified. */
+export interface ApplicationReceipt {
+  code: string;
+  status: ApplicationStatus;
+  amountCents: number;
+}
+
+export const applicationStatusSchema = z.object({
+  code: text(4, 20, "Application code"),
+  email,
+});
+
+/** Shown to someone who supplies both the application code and its email. */
+export interface ApplicationStatusView {
+  code: string;
+  status: ApplicationStatus;
+  submittedAt: string;
+  reviewNote: string | null;
+  /** Set once approved. */
+  memberNo: string | null;
+  /** For an online application that is not a member yet: where its payment stands. */
+  online: OnlineApplicationStatus | null;
+}
+
+export interface MembershipApplication {
+  id: string;
+  code: string;
   name: string;
-  duesOwedCents: number;
+  email: string;
+  studentId: string | null;
+  phone: string | null;
+  amountCents: number;
+  paymentMethod: ApplicationMethod;
+  paymentReference: string;
+  /** Fetch the image from `/api/files/:id`. Reviewers only. */
+  evidenceFileId: string | null;
+  status: ApplicationStatus;
+  reviewNote: string | null;
+  reviewedByName: string | null;
+  reviewedAt: string | null;
+  memberId: string | null;
+  memberNo: string | null;
+  /** `razorpay` rows were paid online and approved by the verified payment, not by a reviewer. */
+  channel: ApplicationChannel;
+  createdAt: string;
+}
+
+export const applicationReviewSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("approve"),
+    /** The reviewer states that they checked the club's account and the money arrived. */
+    paymentReceived: z.literal(true, { error: "Confirm that the payment was received" }),
+  }),
+  z.object({ action: z.literal("reject"), reason: text(3, 300, "Reason") }),
+]);
+
+export interface ApplicationReview {
+  application: MembershipApplication;
+  /** Present after an approval: the link the new member uses to set a password. */
+  setup: SetupLink | null;
+}
+
+/** How to pay the membership fee. `upi` is null until the club's UPI ID is configured. */
+export interface PaymentInstructions {
+  feeCents: number;
+  upi: { payeeName: string; vpa: string; qrSvg: string } | null;
+  /** Whether the fee can be paid online right now. */
+  online: { available: boolean };
+}
+
+// ---------------------------------------------------------------------------
+// Paying the membership fee online (Razorpay)
+// ---------------------------------------------------------------------------
+
+/** Where an application came from: the manual form, or an online payment. */
+export type ApplicationChannel = "manual" | "razorpay";
+
+export const ONLINE_APPLICATION_STATUSES = [
+  "pending",
+  "failed",
+  "superseded",
+  "activated",
+  "needs_review",
+  "refunded",
+] as const;
+/**
+ * - `pending`: an order exists and has not been paid.
+ * - `failed`: the last attempt failed or was abandoned; it can be paid again.
+ * - `superseded`: the person started a newer application.
+ * - `activated`: the payment was verified and the member created.
+ * - `needs_review`: the payment was verified, but no member could be created.
+ * - `refunded`: a reviewer returned a `needs_review` payment.
+ */
+export type OnlineApplicationStatus = (typeof ONLINE_APPLICATION_STATUSES)[number];
+export const ONLINE_APPLICATION_STATUS_LABELS: Record<OnlineApplicationStatus, string> = {
+  pending: "Awaiting payment",
+  failed: "Payment failed",
+  superseded: "Replaced",
+  activated: "Paid · member created",
+  needs_review: "Paid · needs review",
+  refunded: "Refunded",
+};
+
+export const onlineApplicationInputSchema = z.object({
+  name: text(2, 100, "Name"),
+  email,
+  studentId: optionalText(40),
+  phone: optionalText(30),
+});
+export type OnlineApplicationInput = z.infer<typeof onlineApplicationInputSchema>;
+
+/** The secret a browser gets when it starts an online application. */
+const accessToken = z.string().min(20).max(100);
+
+/**
+ * What the applicant's browser may ask about its own application. Every
+ * action needs the access token. `confirm` carries what Razorpay Checkout
+ * returned; the server verifies it and never takes it as proof on its own.
+ */
+export const onlineApplicationActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("resume"), token: accessToken }),
+  z.object({
+    action: z.literal("confirm"),
+    token: accessToken,
+    razorpayOrderId: z.string().regex(/^order_[A-Za-z0-9]{6,40}$/),
+    razorpayPaymentId: z.string().regex(/^pay_[A-Za-z0-9]{6,40}$/),
+    razorpaySignature: z.string().regex(/^[a-fA-F0-9]{64}$/),
+  }),
+  z.object({ action: z.literal("failed"), token: accessToken, reason: optionalText(200) }),
+  z.object({ action: z.literal("new_link"), token: accessToken }),
+]);
+export type OnlineApplicationAction = z.infer<typeof onlineApplicationActionSchema>;
+
+/** What Razorpay Checkout needs to take the payment. The key ID is public; the secret never leaves the server. */
+export interface OnlineCheckout {
+  keyId: string;
+  orderId: string;
+  amountCents: number;
+  currency: string;
+  name: string;
+  email: string;
+  phone: string | null;
+}
+
+/** An online application as its own applicant sees it. */
+export interface OnlineApplicationState {
+  id: string;
+  code: string;
+  status: OnlineApplicationStatus;
+  amountCents: number;
+  /** A payment exists but Razorpay has not finished it yet. Nothing is activated. */
+  processing: boolean;
+  failureReason: string | null;
+  /** Set once the payment is verified and the member exists. */
+  memberNo: string | null;
+  /** Present while the application can still be paid. */
+  checkout: OnlineCheckout | null;
+  /** The one-time password link. Only ever sent after a verified payment, to the holder of the access token. */
+  setup: SetupLink | null;
+  /** Whether the holder may ask for a replacement link (`new_link`). */
+  canRequestLink: boolean;
+}
+
+/** Returned once, when the application is started. The token is not stored readably anywhere. */
+export interface OnlineApplicationStart extends OnlineApplicationState {
+  accessToken: string;
+}
+
+/** An online application as the treasurer and president see it. */
+export interface OnlinePayment {
+  id: string;
+  code: string;
+  name: string;
+  email: string;
+  studentId: string | null;
+  phone: string | null;
+  amountCents: number;
+  currency: string;
+  status: OnlineApplicationStatus;
+  razorpayOrderId: string;
+  razorpayPaymentId: string | null;
+  paymentMethod: string | null;
+  paidAt: string | null;
+  verifiedVia: "checkout" | "webhook" | "lookup" | null;
+  failureReason: string | null;
+  /** Why a paid application could not become a member automatically. */
+  reviewReason: string | null;
+  resolvedByName: string | null;
+  resolvedAt: string | null;
+  resolutionNote: string | null;
+  memberId: string | null;
+  memberNo: string | null;
+  /** Whether the member has set a password yet. */
+  hasAccount: boolean;
+  createdAt: string;
+}
+
+/**
+ * What a reviewer may do with an online application:
+ * - `check`: ask Razorpay whether the order was paid, and finish it if so.
+ * - `activate`: try again to create the member for a paid application.
+ * - `refunded`: record that the payment was returned in the Razorpay dashboard.
+ */
+export const onlineReconcileSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("check") }),
+  z.object({ action: z.literal("activate") }),
+  z.object({ action: z.literal("refunded"), note: text(3, 300, "Note") }),
+]);
+export type OnlineReconcileAction = z.infer<typeof onlineReconcileSchema>;
+
+export interface OnlineReconcileResult {
+  payment: OnlinePayment;
+  /** Present when this action created the member: the link to pass on. */
+  setup: SetupLink | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -628,20 +1017,39 @@ export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
 export const taskInputSchema = z.object({
   title: text(2, 140, "Title"),
   description: z.string().trim().max(1000, "Description is too long").default(""),
+  /** A name, for a volunteer who is not a member. Ignored when `assigneeMemberId` is set. */
   assignee: optionalText(80),
+  /** Assign to a member: the task then appears in that member's own task list. */
+  assigneeMemberId: idRef,
   dueOn: ymd("Due date").nullish().transform((v) => v ?? null),
-  status: z.enum(TASK_STATUSES).default("todo"),
   eventId: idRef,
 });
 export type TaskInput = z.infer<typeof taskInputSchema>;
 
-export const taskStatusSchema = z.object({ status: z.enum(TASK_STATUSES) });
+/**
+ * The only ways a task's status changes. Each applies to exactly one status:
+ * start (to do → in progress), done (in progress → done), reopen (done → in progress).
+ */
+export const TASK_ACTIONS = ["start", "done", "reopen"] as const;
+export type TaskAction = (typeof TASK_ACTIONS)[number];
+export const taskActionSchema = z.object({
+  action: z.enum(TASK_ACTIONS, { error: "Choose start, done or reopen" }),
+});
+
+/** The one action available for a task in each status. */
+export const TASK_NEXT_ACTION: Record<TaskStatus, { action: TaskAction; label: string }> = {
+  todo: { action: "start", label: "Start" },
+  in_progress: { action: "done", label: "Done" },
+  done: { action: "reopen", label: "Reopen" },
+};
 
 export interface Task {
   id: string;
   title: string;
   description: string;
   assignee: string | null;
+  /** Set when the task is assigned to a member, who may then progress it. */
+  assigneeMemberId: string | null;
   dueOn: string | null;
   status: TaskStatus;
   eventId: string | null;
@@ -687,9 +1095,22 @@ export interface PublicAnnouncement {
 // Merchandise
 // ---------------------------------------------------------------------------
 
+export const PRODUCT_CATEGORIES = ["apparel", "accessories", "stationery", "other"] as const;
+export type ProductCategory = (typeof PRODUCT_CATEGORIES)[number];
+export const PRODUCT_CATEGORY_LABELS: Record<ProductCategory, string> = {
+  apparel: "Clothing",
+  accessories: "Accessories",
+  stationery: "Stationery",
+  other: "Other",
+};
+
+/** Most photos one product may have. */
+export const MAX_PRODUCT_IMAGES = 6;
+
 export const productInputSchema = z
   .object({
     name: text(2, 100, "Name"),
+    category: z.enum(PRODUCT_CATEGORIES).default("apparel"),
     description: z.string().trim().max(600, "Description is too long").default(""),
     priceCents: positiveCents("Price"),
     memberPriceCents: positiveCents("Member price"),
@@ -723,8 +1144,18 @@ export const productInputSchema = z
   });
 export type ProductInput = z.infer<typeof productInputSchema>;
 
+const stockCount = z
+  .number({ error: "Stock must be a number" })
+  .int("Stock must be a whole number")
+  .min(0, "Stock cannot be negative")
+  .max(100000, "Stock is too large");
+
+/** Add a size to an existing product. */
+export const variantInputSchema = z.object({ size: text(1, 20, "Size"), stock: stockCount });
+
 export const productUpdateSchema = z.object({
   name: text(2, 100, "Name"),
+  category: z.enum(PRODUCT_CATEGORIES).default("apparel"),
   description: z.string().trim().max(600).default(""),
   priceCents: positiveCents("Price"),
   memberPriceCents: positiveCents("Member price"),
@@ -746,13 +1177,21 @@ export interface ProductVariant {
   stock: number;
 }
 
+/** A product photo. `url` is public: product photos are shown in the shop. */
+export interface ProductImage {
+  id: string;
+  url: string;
+}
+
 export interface Product {
   id: string;
   name: string;
+  category: ProductCategory;
   description: string;
   priceCents: number;
   memberPriceCents: number;
   active: boolean;
+  images: ProductImage[];
   variants: ProductVariant[];
   totalStock: number;
   /** Units in orders that are not cancelled. */
@@ -762,10 +1201,67 @@ export interface Product {
 export interface PublicProduct {
   id: string;
   name: string;
+  category: ProductCategory;
   description: string;
   priceCents: number;
   memberPriceCents: number;
+  images: ProductImage[];
   variants: { id: string; size: string; inStock: boolean; stock: number }[];
+}
+
+/** Most of one size a single checkout may take. */
+export const MAX_QUANTITY_PER_LINE = 10;
+
+const cartLine = z.object({
+  variantId: z.string({ error: "Choose a size" }).min(1, "Choose a size").max(60),
+  quantity: z
+    .number({ error: "Quantity must be a number" })
+    .int("Quantity must be a whole number")
+    .min(1, "Order at least one")
+    .max(MAX_QUANTITY_PER_LINE, `At most ${MAX_QUANTITY_PER_LINE} of one size per order`),
+});
+const cartLines = z.array(cartLine).min(1, "Your cart is empty").max(20, "Too many different items in one order");
+
+/**
+ * A cart sent for checkout. It carries only what was chosen: which size and
+ * how many. Prices and totals are worked out on the server and anything the
+ * browser sends for them is ignored.
+ */
+export const checkoutInputSchema = z.object({
+  items: cartLines,
+  name: text(2, 100, "Name"),
+  email,
+  memberNo: optionalText(20),
+});
+export type CheckoutInput = z.infer<typeof checkoutInputSchema>;
+
+/** A signed-in member's checkout: who they are comes from the session. */
+export const memberCheckoutSchema = z.object({ items: cartLines });
+
+export interface OrderLine {
+  orderId: string;
+  productId: string;
+  productName: string;
+  size: string;
+  quantity: number;
+  unitPriceCents: number;
+  totalCents: number;
+  /** Whether the money has been collected. Separate from hand-over. */
+  paymentStatus: "pending" | "paid";
+  status: OrderStatus;
+}
+
+/** One checkout: everything bought together. Returned after ordering and in order history. */
+export interface ShopOrder {
+  code: string;
+  createdAt: string;
+  buyerName: string;
+  isMember: boolean;
+  /** Sum of the lines that are not cancelled. */
+  totalCents: number;
+  /** Part of the total not yet collected. */
+  unpaidCents: number;
+  lines: OrderLine[];
 }
 
 export const orderInputSchema = z.object({
@@ -793,6 +1289,8 @@ export type OrderStatus = "placed" | "fulfilled" | "cancelled";
 export interface Order {
   id: string;
   code: string;
+  /** The checkout this line was bought in; null for orders placed before checkouts existed. */
+  checkoutCode: string | null;
   productId: string;
   productName: string;
   size: string;
@@ -880,7 +1378,7 @@ export interface Dashboard {
 }
 
 // ---------------------------------------------------------------------------
-// Event analysis (deterministic; shared by the event page and the assistant)
+// Event analysis (deterministic; shown on the event page)
 // ---------------------------------------------------------------------------
 
 export interface BreakEvenScenario {
@@ -927,41 +1425,6 @@ export interface ProfitTargetAnalysis {
   /** Events only: extra standard-price tickets that would close the projected gap. */
   ticketsToCloseGap: number | null;
   seatsRemaining: number | null;
-}
-
-// ---------------------------------------------------------------------------
-// Assistant
-// ---------------------------------------------------------------------------
-
-export const assistantQuestionSchema = z.object({
-  question: text(2, 500, "Question"),
-});
-
-export type AssistantFactKind = "actual" | "estimate" | "recommendation";
-
-export interface AssistantFact {
-  label: string;
-  value: string;
-  /**
-   * actual         — read directly from stored records
-   * estimate       — calculated from records plus a stated assumption
-   * recommendation — a suggested action, not a fact
-   */
-  kind: AssistantFactKind;
-}
-
-export interface AssistantAnswer {
-  /** Which engine produced the wording. Numbers always come from application code. */
-  engine: "rules" | "claude";
-  engineLabel: string;
-  intent: string;
-  answer: string;
-  facts: AssistantFact[];
-  /** Which records the answer was computed from. */
-  sources: string[];
-  /** Set when the assistant fell back or could not fully answer. */
-  notice: string | null;
-  suggestions: string[];
 }
 
 // ---------------------------------------------------------------------------

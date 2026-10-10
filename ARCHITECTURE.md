@@ -24,7 +24,6 @@ from `src/app` or `src/components`, and UI code never imports from `src/server`.
 | Tailwind CSS v4 | Styling from design tokens in `src/app/globals.css`. |
 | `qrcode`, `jsqr` | QR generated on the server as SVG; decoded in the browser from the camera. |
 | Vitest | Service tests against a temporary database. |
-| `@anthropic-ai/sdk` (optional) | Used only when `ANTHROPIC_API_KEY` is set. |
 
 Firebase was considered and not used: this environment had no project or credentials,
 security rules would have needed deploying and testing, and the demo would have depended
@@ -45,7 +44,6 @@ src/server/         Server only
   errors.ts           AppError and requireRole
   services/           events, tickets, finance, members, merch, tasks,
                       announcements, analysis, dashboard
-  assistant/          tools.ts (read-only data tools), rules.ts, claude.ts, index.ts
   seed.ts             Demo data
 src/app/api/        Route handlers, a few lines each
 src/app/org/        Staff pages          src/app/(public)/  Public pages
@@ -62,6 +60,14 @@ dates are `YYYY-MM-DD` in the organisation's timezone. The schema is in `src/ser
 |---|---|---|
 | `users`, `sessions` | Staff accounts and sign-ins | Session token stored as SHA-256; role read from `users` on every request |
 | `members`, `membership_periods` | People and their terms | Status is derived from terms, never stored |
+| `member_accounts`, `member_sessions` | Member passwords and sign-ins | Separate from staff tables, so a member session can only ever resolve to the role `member` |
+| `account_setup_tokens` | One-time password-setup links | Only the SHA-256 is stored; single use; 72-hour expiry; a new link revokes the old one |
+| `membership_applications` | People who say they have paid the fee | One open application per email; a UPI or bank reference can be used once. `channel` is `manual` or `razorpay` |
+| `online_applications` | Membership fees paid through Razorpay | One Razorpay order per row; a payment ID is unique, so it pays for one membership. Becomes a member only after the server verifies the payment (`src/server/services/online-applications.ts`) |
+| `razorpay_webhook_events` | Webhook deliveries that passed signature verification | Keyed by Razorpay's event ID, so a repeat delivery does nothing |
+| `expense_claims` | Reimbursement requests | Receipt photo required; one linked ledger row at most |
+| `checkouts`, `product_images` | Items bought together; product photos | `orders` rows are the lines of a checkout |
+| `files` | Uploaded evidence and product photos (bytes on disk under `<db folder>/uploads`) | JPEG, PNG or WebP by content, 5 MB cap, random id as the file name |
 | `events` | Draft → published → cancelled | `capacity > 0`, prices `>= 0` |
 | `tickets` | One row per registration | Unique `code`; unique `(event_id, email)` among valid tickets |
 | `transactions` | The ledger | `amount_cents > 0`; `status` settled or pending; `voided_at` |
@@ -71,7 +77,7 @@ dates are `YYYY-MM-DD` in the organisation's timezone. The schema is in `src/ser
 ## Rules that hold everywhere
 
 **The ledger is the only source of money figures.** Every dashboard tile, event result
-and assistant answer is a `SUM` over non-voided `transactions` rows.
+and analysis card is a `SUM` over non-voided `transactions` rows.
 `settled` means money moved; `pending` means it is owed. Net = settled income − settled
 expenses. Pending amounts are always reported separately.
 
@@ -88,6 +94,33 @@ with capacity, insert. Editing capacity below the registered count is refused.
 
 **Stock.** `UPDATE … SET stock = stock - ? WHERE stock >= ?`, backed by a `CHECK`.
 
+**Nobody becomes a member on their own say-so.** A public application creates a
+pending row and nothing else: no member, no member ID, no ledger entry. The QR code on
+the join page only encodes a request to pay the club's UPI ID; scanning it, and
+uploading a screenshot, verify nothing. An admin or treasurer must approve with
+`paymentReceived: true`, and only then does one transaction create the member, a paid
+term, a settled dues row and a password-setup link.
+
+**Members are not staff.** `staffRoute` refuses the role `member` on every staff
+endpoint, including those open to all staff roles, and `requireRole` refuses it in
+every service. Member endpoints use `memberRoute`, which takes the member id from the
+session and never from the request.
+
+**A claim reaches the ledger once.** An expense claim is a request with a required
+receipt photo and is not in the ledger. Approval writes one pending expense row and
+links it (`expense_claims.transaction_id`, unique). Paying that row, from the claims
+screen or the finance screen, marks the claim paid. The row cannot be edited or voided
+by hand, and nobody reviews their own claim.
+
+**Checkout is all-or-nothing and priced on the server.** A cart is a list of sizes and
+quantities. In one transaction each size is taken with the conditional stock update and
+priced from the product row; if any size is short, everything rolls back. Each line
+stores the name, size and price it was sold at.
+
+**Task status moves one step.** `transitionTask` accepts start, done or reopen, and its
+UPDATE names the status it expects. A member can take those steps on tasks assigned to
+them and nothing else.
+
 **Cancelling never deletes income.** Unpaid charges are voided. For anything already
 paid, a pending `refund` expense is recorded so the books show what is owed back.
 
@@ -103,33 +136,27 @@ paid, a pending `refund` expense is recorded so the books show what is owed back
 - Mutating requests with a foreign `Origin` header are refused.
 - Public endpoints return purpose-built shapes (`PublicEvent`, `PublicTicket`…) with
   no emails or member lists. Member pricing needs both the email and the member number.
-- Login, public forms, ticket lookup and the assistant are rate-limited per address
+- Login, public forms and ticket lookup are rate-limited per address
   (in memory, per process).
 - All SQL uses bound parameters.
-
-## The assistant
-
-`src/server/assistant/tools.ts` defines ten read-only tools. Each returns a summary, a
-list of facts tagged `actual`, `estimate` or `recommendation`, and the records it read.
-All arithmetic is in the tools or in `services/analysis.ts`.
-
-- **Rule engine** (`rules.ts`, the default): keyword scoring picks a tool, a title match
-  picks the event, a regex reads an amount. The answer is the tool's own summary.
-- **Claude engine** (`claude.ts`, when `ANTHROPIC_API_KEY` is set): Claude chooses tools
-  through tool use and writes the wording. The facts shown beside the answer come
-  straight from the tool results, not from the model's text. Any failure, refusal or
-  answer that used no tool falls back to the rule engine, and the response says so.
-
-Every response names the engine that produced it.
+- Uploads are private. They are stored outside the web root, typed by their first
+  bytes, and served only by `/api/files/:id` after `readEvidence` has checked the
+  caller, with `nosniff`, a sandboxing CSP and `no-store`.
+- Password-setup links are shown once to the staff member who issued them. There is no
+  email service, so that person passes the link on.
 
 ## Known limits
 
 - No payment gateway and no email or SMS. Payments are recorded by staff; announcements
   go on the news board. The UI states this wherever it matters.
+- A member's tickets and orders are matched by member id or by the email on the record.
+  If staff change a member's email to one used earlier for guest purchases, those
+  purchases appear on that member's account.
+- The cart lives in the browser. It does not follow a member to another device.
+- Sign-in is rate-limited per address, not per account.
+- Product photos must be uploaded by the committee; none ship with the app.
 - One organisation per installation. No self-service password reset or account
   management UI: accounts are created by the seed script.
-- The Claude engine has not been exercised against the live API in this build (no key
-  was available). The rule engine is covered by tests.
 - Public sign-up reveals whether an email is already a member ("already on the list").
 - Rate limits and the single SQLite connection assume one server process.
 - The interface is light-theme only. Tokens are structured so a dark theme can be added

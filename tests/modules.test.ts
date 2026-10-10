@@ -11,12 +11,11 @@ import {
   collectDues,
   createMember,
   getMember,
-  joinAsMember,
   listMembers,
   renewMember,
 } from "@/server/services/members";
 import { actOnOrder, createProduct, getProduct, listOrders, listPublicProducts, placeOrder, setStock } from "@/server/services/merch";
-import { createTask, listTasks, setTaskStatus } from "@/server/services/tasks";
+import { createTask, listTasks, transitionTask } from "@/server/services/tasks";
 import { registerForEvent } from "@/server/services/tickets";
 import { appError, freshDb, person, publishedEvent, type Staff } from "./helpers";
 
@@ -35,7 +34,7 @@ describe("memberships", () => {
     expect(paid.status).toBe("active");
     expect(paid.paidUntilOn).toBe(`${today().slice(0, 4)}-12-31`);
 
-    const joined = joinAsMember({ name: "Walk Up", email: "walkup@campus.example", studentId: null, phone: null });
+    const joined = createMember(member(2, { name: "Walk Up", duesPaid: false }), staff.treasurer);
     expect(joined.memberNo).toBe("SKY-M-0002");
     expect(joined.duesOwedCents).toBe(SETTINGS.membershipFeeCents);
     const unpaid = listMembers().find((m) => m.memberNo === "SKY-M-0002")!;
@@ -54,7 +53,7 @@ describe("memberships", () => {
   it("rejects duplicate emails and unauthorised changes", () => {
     createMember(member(1), staff.treasurer);
     expect(appError(() => createMember(member(1), staff.treasurer)).code).toBe("email_taken");
-    expect(appError(() => joinAsMember({ name: "Dup", email: "MEMBER1@campus.example", studentId: null, phone: null })).code).toBe("email_taken");
+    expect(appError(() => createMember(member(1, { email: "MEMBER1@campus.example" }), staff.treasurer)).code).toBe("email_taken");
     expect(appError(() => createMember(member(2), staff.organizer)).status).toBe(403);
     expect(appError(() => createMember(member(2), null)).status).toBe(401);
   });
@@ -88,7 +87,7 @@ describe("memberships", () => {
   it("applies the member price only for a matching number, email and paid term", () => {
     const event = publishedEvent(staff); // 500 standard, 400 member
     const active = createMember(member(1), staff.treasurer);
-    const unpaid = joinAsMember({ name: "Unpaid", email: "unpaid@campus.example", studentId: null, phone: null });
+    const unpaid = createMember(member(2, { name: "Unpaid", email: "unpaid@campus.example", duesPaid: false }), staff.treasurer);
     const lapsing = createMember(member(3, { expiresOn: addDays(today(), 2) }), staff.treasurer);
 
     const ok = registerForEvent(event.id, { name: "Member 1", email: active.email, studentId: null, memberNo: active.memberNo.toLowerCase() });
@@ -193,8 +192,14 @@ describe("merchandise", () => {
 
 describe("tasks and announcements", () => {
   it("flags overdue tasks until they are done", () => {
-    const task = (title: string, dueOn: string | null, status = "todo") =>
-      createTask(taskInputSchema.parse({ title, dueOn, status }), staff.organizer);
+    const task = (title: string, dueOn: string | null, status = "todo") => {
+      const created = createTask(taskInputSchema.parse({ title, dueOn }), staff.organizer);
+      if (status === "done") {
+        transitionTask(created.id, "start", staff.organizer);
+        transitionTask(created.id, "done", staff.organizer);
+      }
+      return created;
+    };
     const late = task("Book the hall", addDays(today(), -3));
     task("Print posters", addDays(today(), 2));
     task("Due today", today());
@@ -205,7 +210,9 @@ describe("tasks and announcements", () => {
     expect(overdue.map((t) => t.title)).toEqual(["Book the hall"]);
     expect(overdue[0].daysOverdue).toBe(3);
 
-    setTaskStatus(late.id, "done", staff.organizer);
+    transitionTask(late.id, "start", staff.organizer);
+    expect(listTasks().filter((t) => t.isOverdue)).toHaveLength(1); // started, still late
+    transitionTask(late.id, "done", staff.organizer);
     expect(listTasks().filter((t) => t.isOverdue)).toHaveLength(0);
     expect(taskInputSchema.safeParse({ title: "" }).success).toBe(false);
     expect(taskInputSchema.safeParse({ title: "Ok", dueOn: "tomorrow" }).success).toBe(false);

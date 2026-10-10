@@ -46,6 +46,17 @@ export function listPublicAnnouncements(): PublicAnnouncement[] {
   );
 }
 
+/** What a signed-in member reads: public posts and member-only ones, without author details. */
+export function listMemberAnnouncements(): (PublicAnnouncement & { membersOnly: boolean })[] {
+  return all<Row>(`${SELECT} ORDER BY a.published_at DESC LIMIT 50`).map((r) => ({
+    id: r.id,
+    title: r.title,
+    body: r.body,
+    publishedAt: r.published_at,
+    membersOnly: r.audience === "members",
+  }));
+}
+
 export function createAnnouncement(input: AnnouncementInput, actor: SessionUser | null): Announcement {
   const user = requireRole(actor, "admin", "organizer");
   const id = newId("ann");

@@ -19,7 +19,6 @@ export function freshDb(): Staff {
   closeDb();
   setClock(null);
   process.env.SKYLINE_DB_PATH = path.join(dir, "test.db");
-  delete process.env.ANTHROPIC_API_KEY;
   return {
     admin: createUser({ email: "admin@test.example", name: "Admin", role: "admin", password: "password-1" }),
     treasurer: createUser({ email: "treasurer@test.example", name: "Treasurer", role: "treasurer", password: "password-1" }),

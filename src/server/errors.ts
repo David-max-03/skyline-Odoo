@@ -34,6 +34,19 @@ export const invalid = (message: string, fields?: Record<string, string>) =>
  */
 export function requireRole(actor: SessionUser | null | undefined, ...roles: Role[]): SessionUser {
   if (!actor) throw unauthorized();
-  if (!roles.includes(actor.role)) throw forbidden();
+  // A member account has role "member", which is in no staff role list.
+  if (!(roles as readonly string[]).includes(actor.role)) throw forbidden();
   return actor;
+}
+
+/**
+ * For actions a member performs on their own records. Returns the member id,
+ * which always comes from the session, never from the request.
+ */
+export function requireMember(actor: SessionUser | null | undefined): string {
+  if (!actor) throw unauthorized();
+  if (actor.role !== "member" || !actor.memberId) {
+    throw forbidden("Sign in with a member account to do this.");
+  }
+  return actor.memberId;
 }

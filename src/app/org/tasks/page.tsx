@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarDays, CircleAlert, ListChecks, Pencil, Plus, Trash2, User } from "lucide-react";
+import { ArrowRight, CalendarDays, Check, CircleAlert, ListChecks, Pencil, Plus, RotateCcw, Trash2, User } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { ConfirmDialog, Dialog, DialogActions, useToast } from "@/components/overlay";
 import { useCan } from "@/components/session";
@@ -20,7 +20,7 @@ import {
   cn,
 } from "@/components/ui";
 import { api, errorMessage, fieldErrors, useApi } from "@/lib/api-client";
-import { TASK_STATUSES, TASK_STATUS_LABELS, type EventSummary, type Task, type TaskStatus } from "@/lib/contracts";
+import { TASK_NEXT_ACTION, TASK_STATUSES, TASK_STATUS_LABELS, type EventSummary, type Member, type Task } from "@/lib/contracts";
 import { formatDate } from "@/lib/dates";
 
 export default function TasksPage() {
@@ -28,6 +28,7 @@ export default function TasksPage() {
   const canDelete = useCan("manageEvents");
   const tasks = useApi<Task[]>("/api/tasks");
   const events = useApi<EventSummary[]>("/api/events");
+  const members = useApi<Member[]>("/api/members");
   const [eventFilter, setEventFilter] = useState("");
   const [editing, setEditing] = useState<Task | "new" | null>(null);
   const [deleting, setDeleting] = useState<Task | null>(null);
@@ -39,10 +40,11 @@ export default function TasksPage() {
   const overdue = visible.filter((t) => t.isOverdue).length;
   const eventOptions = (events.data ?? []).filter((e) => e.status !== "cancelled");
 
-  async function move(task: Task, status: TaskStatus) {
+  /** Takes the one step available from the task's current status. */
+  async function advance(task: Task) {
     setBusy(task.id);
     try {
-      await api(`/api/tasks/${task.id}`, { method: "PATCH", body: { status } });
+      await api(`/api/tasks/${task.id}`, { method: "PATCH", body: { action: TASK_NEXT_ACTION[task.status].action } });
       tasks.reload();
     } catch (error) {
       toast.error(errorMessage(error));
@@ -190,21 +192,18 @@ export default function TasksPage() {
                             )}
                           </div>
                           {task.eventTitle && <p className="mt-1.5 text-xs text-subtle">{task.eventTitle}</p>}
-                          <label className="mt-3 flex items-center gap-2 border-t border-line pt-2.5 text-xs font-medium text-muted">
-                            Move to
-                            <select
-                              value={task.status}
-                              disabled={busy === task.id}
-                              onChange={(e) => move(task, e.target.value as TaskStatus)}
-                              className="h-8 flex-1 rounded-control border border-line-strong bg-surface px-2 text-[0.8125rem] text-ink focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25"
+                          <div className="mt-3 border-t border-line pt-3">
+                            {/* One action per status: Start, then Done, then Reopen. */}
+                            <Button
+                              className="w-full"
+                              icon={task.status === "todo" ? ArrowRight : task.status === "in_progress" ? Check : RotateCcw}
+                              loading={busy === task.id}
+                              aria-label={`${TASK_NEXT_ACTION[task.status].label}: ${task.title}`}
+                              onClick={() => advance(task)}
                             >
-                              {TASK_STATUSES.map((s) => (
-                                <option key={s} value={s}>
-                                  {TASK_STATUS_LABELS[s]}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
+                              {TASK_NEXT_ACTION[task.status].label}
+                            </Button>
+                          </div>
                         </li>
                       ))}
                     </ul>
@@ -222,6 +221,7 @@ export default function TasksPage() {
             key={editing === "new" ? "new" : editing.id}
             task={editing === "new" ? undefined : editing}
             events={eventOptions}
+            members={members.data ?? []}
             defaultEventId={eventFilter && eventFilter !== "none" ? eventFilter : ""}
             onCancel={() => setEditing(null)}
             onSaved={() => {
@@ -251,12 +251,14 @@ export default function TasksPage() {
 function TaskForm({
   task,
   events,
+  members,
   defaultEventId,
   onSaved,
   onCancel,
 }: {
   task?: Task;
   events: EventSummary[];
+  members: Member[];
   defaultEventId: string;
   onSaved: () => void;
   onCancel: () => void;
@@ -264,9 +266,10 @@ function TaskForm({
   const [values, setValues] = useState({
     title: task?.title ?? "",
     description: task?.description ?? "",
-    assignee: task?.assignee ?? "",
+    // A member is chosen from the list; anyone else is typed in as a name.
+    assignee: task?.assigneeMemberId ? "" : (task?.assignee ?? ""),
+    assigneeMemberId: task?.assigneeMemberId ?? "",
     dueOn: task?.dueOn ?? "",
-    status: task?.status ?? "todo",
     eventId: task?.eventId ?? defaultEventId,
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -280,7 +283,13 @@ function TaskForm({
     setSaving(true);
     setFormError(null);
     try {
-      const body = { ...values, assignee: values.assignee || null, dueOn: values.dueOn || null, eventId: values.eventId || null };
+      const body = {
+        ...values,
+        assignee: values.assigneeMemberId ? null : values.assignee || null,
+        assigneeMemberId: values.assigneeMemberId || null,
+        dueOn: values.dueOn || null,
+        eventId: values.eventId || null,
+      };
       await api(task ? `/api/tasks/${task.id}` : "/api/tasks", { method: task ? "PUT" : "POST", body });
       onSaved();
     } catch (error) {
@@ -296,17 +305,31 @@ function TaskForm({
       <FormError message={formError} />
       <TextField label="What needs doing?" value={values.title} onChange={set("title")} error={errors.title} placeholder="Buy baking supplies" required autoFocus={!task} />
       <div className="grid gap-4 sm:grid-cols-2">
-        <TextField label="Who is doing it?" value={values.assignee} onChange={set("assignee")} error={errors.assignee} optional placeholder="Volunteer's name" />
-        <TextField label="Due date" type="date" value={values.dueOn} onChange={set("dueOn")} error={errors.dueOn} optional />
-      </div>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <SelectField label="Status" value={values.status} onChange={set("status")} error={errors.status}>
-          {TASK_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {TASK_STATUS_LABELS[s]}
+        <SelectField
+          label="Assign to a member"
+          value={values.assigneeMemberId}
+          onChange={set("assigneeMemberId")}
+          error={errors.assigneeMemberId}
+          hint="They see the task when they sign in and can start and finish it."
+          optional
+        >
+          <option value="">Not a member</option>
+          {members.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name} · {m.memberNo}
             </option>
           ))}
         </SelectField>
+        {values.assigneeMemberId ? (
+          <TextField label="Due date" type="date" value={values.dueOn} onChange={set("dueOn")} error={errors.dueOn} optional />
+        ) : (
+          <TextField label="Or type a name" value={values.assignee} onChange={set("assignee")} error={errors.assignee} optional placeholder="Volunteer's name" />
+        )}
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {!values.assigneeMemberId && (
+          <TextField label="Due date" type="date" value={values.dueOn} onChange={set("dueOn")} error={errors.dueOn} optional />
+        )}
         <SelectField label="Event" value={values.eventId} onChange={set("eventId")} error={errors.eventId} optional>
           <option value="">Not tied to an event</option>
           {events.map((e) => (

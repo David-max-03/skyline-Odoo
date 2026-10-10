@@ -14,10 +14,13 @@ export default function OrgLayout({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const signedOut = me.data !== null && me.data.user === null;
+  // Members have their own area. The API refuses them here regardless.
+  const isMember = me.data?.user?.role === "member";
 
   useEffect(() => {
     if (signedOut) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
-  }, [signedOut, router, pathname]);
+    if (isMember) router.replace("/member");
+  }, [signedOut, isMember, router, pathname]);
 
   if (me.error && !me.data) {
     return (
@@ -27,7 +30,7 @@ export default function OrgLayout({ children }: { children: ReactNode }) {
     );
   }
 
-  if (!me.data?.user) {
+  if (!me.data?.user || isMember) {
     return (
       <div role="status" className="flex min-h-dvh items-center justify-center">
         <span className="sr-only">Loading your workspace…</span>

@@ -301,11 +301,12 @@ describe("finance", () => {
     expect(appError(() => createTransaction(tx({ eventId: "evt_missing" }), staff.treasurer)).status).toBe(422);
   });
 
-  it("limits organizers to pending expense claims", () => {
+  it("keeps organizers out of the ledger: they file claims instead", () => {
     expect(appError(() => createTransaction(tx({}), null)).status).toBe(401);
     expect(appError(() => createTransaction(tx({ status: "settled" }), staff.organizer)).status).toBe(403);
     expect(appError(() => createTransaction(tx({ type: "income", category: "donation", status: "pending" }), staff.organizer)).status).toBe(403);
-    const claim = createTransaction(tx({ status: "pending", counterparty: "Organizer" }), staff.organizer);
+    expect(appError(() => createTransaction(tx({ status: "pending", counterparty: "Organizer" }), staff.organizer)).status).toBe(403);
+    const claim = createTransaction(tx({ status: "pending", counterparty: "Supplier" }), staff.treasurer);
     expect(claim.status).toBe("pending");
     expect(appError(() => settleTransaction(claim.id, "bank", staff.organizer)).status).toBe(403);
     expect(settleTransaction(claim.id, "bank", staff.treasurer).status).toBe("settled");
@@ -319,7 +320,7 @@ describe("finance", () => {
     registerForEvent(gala.id, person(3)); // 500 pending
     createTransaction(tx({ type: "income", category: "sponsorship", amountCents: 200000, eventId: gala.id }), staff.treasurer);
     createTransaction(tx({ category: "venue", amountCents: 150000, eventId: gala.id }), staff.treasurer);
-    createTransaction(tx({ category: "catering", amountCents: 80000, status: "pending", eventId: gala.id }), staff.organizer);
+    createTransaction(tx({ category: "catering", amountCents: 80000, status: "pending", eventId: gala.id }), staff.treasurer);
     createTransaction(tx({ type: "income", category: "donation", amountCents: 30000 }), staff.treasurer); // not tied to an event
     const mistake = createTransaction(tx({ category: "supplies", amountCents: 999900 }), staff.treasurer);
     voidTransaction(mistake.id, "Entered twice", staff.treasurer);

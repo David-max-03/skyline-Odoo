@@ -149,9 +149,7 @@ export function randomCode(length: number): string {
 
 // --- schema ------------------------------------------------------------------
 
-const SCHEMA_VERSION = 1;
-
-const SCHEMA = `
+const SCHEMA_V1 = `
 CREATE TABLE users (
   id            TEXT PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -313,16 +311,242 @@ CREATE TABLE announcements (
 );
 `;
 
+/**
+ * Version 2: member accounts and membership applications. Everything here is
+ * a new table, so an existing database is upgraded in place and no existing
+ * row changes.
+ */
+const SCHEMA_V2 = `
+-- A member's password. Members without a row here have not set one up yet.
+CREATE TABLE member_accounts (
+  member_id       TEXT PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+  password_hash   TEXT NOT NULL,
+  password_set_at TEXT NOT NULL,
+  created_at      TEXT NOT NULL
+);
+
+-- Kept apart from staff sessions so a member session can never resolve to a staff role.
+CREATE TABLE member_sessions (
+  token_hash TEXT PRIMARY KEY,
+  member_id  TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- One-time links for setting a password. Only the SHA-256 of the token is stored.
+CREATE TABLE account_setup_tokens (
+  token_hash TEXT PRIMARY KEY,
+  member_id  TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  used_at    TEXT,
+  created_by TEXT REFERENCES users(id),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX account_setup_tokens_member ON account_setup_tokens(member_id);
+
+-- Uploaded evidence. The bytes live on disk under the uploads folder, named by id.
+CREATE TABLE files (
+  id         TEXT PRIMARY KEY,
+  purpose    TEXT NOT NULL CHECK (purpose IN ('application_payment','claim_receipt','product_image')),
+  mime       TEXT NOT NULL CHECK (mime IN ('image/jpeg','image/png','image/webp')),
+  size       INTEGER NOT NULL CHECK (size > 0),
+  sha256     TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE membership_applications (
+  id                TEXT PRIMARY KEY,
+  code              TEXT NOT NULL UNIQUE,
+  name              TEXT NOT NULL,
+  email             TEXT NOT NULL COLLATE NOCASE,
+  student_id        TEXT,
+  phone             TEXT,
+  amount_cents      INTEGER NOT NULL CHECK (amount_cents >= 0),
+  payment_method    TEXT NOT NULL CHECK (payment_method IN ('upi','bank','cash')),
+  payment_reference TEXT NOT NULL,
+  evidence_file_id  TEXT REFERENCES files(id),
+  status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+  review_note       TEXT,
+  reviewed_by       TEXT REFERENCES users(id),
+  reviewed_at       TEXT,
+  member_id         TEXT REFERENCES members(id),
+  created_at        TEXT NOT NULL
+);
+-- One open application per person.
+CREATE UNIQUE INDEX membership_applications_open_email
+  ON membership_applications(email) WHERE status = 'pending';
+-- A bank or UPI reference pays for one membership only.
+CREATE UNIQUE INDEX membership_applications_reference
+  ON membership_applications(payment_method, payment_reference)
+  WHERE status <> 'rejected' AND payment_method <> 'cash';
+`;
+
+/**
+ * Version 3: a task can be assigned to a member, so the member can see and
+ * progress it. `assignee` stays as the display name; tasks given to someone
+ * without a member record keep a name and a NULL id.
+ */
+const SCHEMA_V3 = `
+ALTER TABLE tasks ADD COLUMN assignee_member_id TEXT REFERENCES members(id) ON DELETE SET NULL;
+CREATE INDEX tasks_assignee_member ON tasks(assignee_member_id);
+`;
+
+/**
+ * Version 4: expense claims. A claim is a request, not money: it reaches the
+ * ledger only when a reviewer approves it, as one pending expense row that
+ * `transaction_id` points at. Paying that row marks the claim paid.
+ */
+const SCHEMA_V4 = `
+CREATE TABLE expense_claims (
+  id                 TEXT PRIMARY KEY,
+  code               TEXT NOT NULL UNIQUE,
+  claimant_member_id TEXT REFERENCES members(id),
+  claimant_user_id   TEXT REFERENCES users(id),
+  claimant_name      TEXT NOT NULL,
+  title              TEXT NOT NULL,
+  justification      TEXT NOT NULL,
+  notes              TEXT,
+  category           TEXT NOT NULL,
+  amount_cents       INTEGER NOT NULL CHECK (amount_cents > 0),
+  spent_on           TEXT NOT NULL,
+  event_id           TEXT REFERENCES events(id),
+  -- A claim cannot exist without its photo.
+  evidence_file_id   TEXT NOT NULL REFERENCES files(id),
+  status             TEXT NOT NULL DEFAULT 'submitted'
+                     CHECK (status IN ('submitted','under_review','approved','rejected','paid')),
+  review_note        TEXT,
+  reviewed_by        TEXT REFERENCES users(id),
+  reviewed_at        TEXT,
+  transaction_id     TEXT UNIQUE REFERENCES transactions(id),
+  created_at         TEXT NOT NULL,
+  -- Exactly one kind of claimant.
+  CHECK ((claimant_member_id IS NULL) <> (claimant_user_id IS NULL))
+);
+CREATE INDEX expense_claims_member ON expense_claims(claimant_member_id);
+CREATE INDEX expense_claims_user ON expense_claims(claimant_user_id);
+`;
+
+/**
+ * Version 5: the shop. A checkout groups the lines bought together. Each
+ * line is still one `orders` row with its own ledger entry, so payment,
+ * hand-over and cancellation keep working per line exactly as before. A line
+ * now also keeps the product name and size it was sold as, so later edits to
+ * a product do not rewrite past orders.
+ */
+const SCHEMA_V5 = `
+ALTER TABLE products ADD COLUMN category TEXT NOT NULL DEFAULT 'apparel';
+
+CREATE TABLE product_images (
+  id         TEXT PRIMARY KEY,
+  product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  file_id    TEXT NOT NULL UNIQUE REFERENCES files(id),
+  position   INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX product_images_product ON product_images(product_id);
+
+CREATE TABLE checkouts (
+  id          TEXT PRIMARY KEY,
+  code        TEXT NOT NULL UNIQUE,
+  buyer_name  TEXT NOT NULL,
+  buyer_email TEXT NOT NULL COLLATE NOCASE,
+  member_id   TEXT REFERENCES members(id),
+  total_cents INTEGER NOT NULL CHECK (total_cents > 0),
+  created_at  TEXT NOT NULL
+);
+
+ALTER TABLE orders ADD COLUMN checkout_id TEXT REFERENCES checkouts(id);
+ALTER TABLE orders ADD COLUMN product_name TEXT;
+ALTER TABLE orders ADD COLUMN size_label TEXT;
+CREATE INDEX orders_checkout ON orders(checkout_id);
+`;
+
+/**
+ * Version 6: paying the membership fee online through Razorpay. Everything
+ * here is additive: one new column with a default, and two new tables.
+ *
+ * An online application lives in `online_applications` until its payment is
+ * verified. Only then does it get a row in `membership_applications` (already
+ * approved, `channel = 'razorpay'`), a member and a ledger entry. The states:
+ *
+ *   pending       order created, no successful payment yet
+ *   failed        the last attempt failed; the same order can be paid again
+ *   superseded    the person started again; a late payment here still counts
+ *   activated     payment verified and the member created
+ *   needs_review  payment verified, but a member could not be created
+ *   refunded      a reviewer returned a needs_review payment in Razorpay
+ */
+const SCHEMA_V6 = `
+ALTER TABLE membership_applications
+  ADD COLUMN channel TEXT NOT NULL DEFAULT 'manual' CHECK (channel IN ('manual','razorpay'));
+
+CREATE TABLE online_applications (
+  id                  TEXT PRIMARY KEY,
+  code                TEXT NOT NULL UNIQUE,
+  name                TEXT NOT NULL,
+  email               TEXT NOT NULL COLLATE NOCASE,
+  student_id          TEXT,
+  phone               TEXT,
+  amount_cents        INTEGER NOT NULL CHECK (amount_cents > 0),
+  currency            TEXT NOT NULL,
+  -- SHA-256 of the secret held by the applicant's browser.
+  access_token_hash   TEXT NOT NULL UNIQUE,
+  status              TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending','failed','superseded','activated','needs_review','refunded')),
+  -- One Razorpay order per application; retries pay the same order.
+  razorpay_order_id   TEXT NOT NULL UNIQUE,
+  -- A payment is recorded once, and pays for one application only.
+  razorpay_payment_id TEXT UNIQUE,
+  payment_method      TEXT,
+  paid_at             TEXT,
+  verified_via        TEXT CHECK (verified_via IN ('checkout','webhook','lookup')),
+  failure_reason      TEXT,
+  failed_at           TEXT,
+  review_reason       TEXT,
+  resolved_by         TEXT REFERENCES users(id),
+  resolved_at         TEXT,
+  resolution_note     TEXT,
+  -- One application row and one member per payment.
+  application_id      TEXT UNIQUE REFERENCES membership_applications(id),
+  member_id           TEXT UNIQUE REFERENCES members(id),
+  -- When a password-setup link was first handed out for this application.
+  setup_link_issued_at TEXT,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  CHECK ((razorpay_payment_id IS NULL) = (paid_at IS NULL)),
+  -- The paid states are exactly the ones with a recorded payment.
+  CHECK ((status IN ('activated','needs_review','refunded')) = (razorpay_payment_id IS NOT NULL)),
+  CHECK ((status = 'activated') = (member_id IS NOT NULL))
+);
+-- One open online application per person.
+CREATE UNIQUE INDEX online_applications_open_email
+  ON online_applications(email) WHERE status IN ('pending','failed');
+CREATE INDEX online_applications_status ON online_applications(status, created_at);
+
+-- Every webhook delivery that passed signature verification, keyed by
+-- Razorpay's event id so a repeat delivery is recognised and skipped.
+CREATE TABLE razorpay_webhook_events (
+  event_id    TEXT PRIMARY KEY,
+  event_type  TEXT NOT NULL,
+  order_id    TEXT,
+  payment_id  TEXT,
+  outcome     TEXT NOT NULL,
+  received_at TEXT NOT NULL
+);
+`;
+
+/** Applied in order; `PRAGMA user_version` records how many have run. */
+const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6];
+
 function migrate(db: DatabaseSync): void {
-  const row = db.prepare("PRAGMA user_version").get() as { user_version: number };
-  if (row.user_version >= SCHEMA_VERSION) return;
+  const version = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  if (version() >= MIGRATIONS.length) return;
   db.exec("BEGIN IMMEDIATE");
   try {
-    // Another process may have migrated while this one waited for the lock.
-    const again = db.prepare("PRAGMA user_version").get() as { user_version: number };
-    if (again.user_version < SCHEMA_VERSION) {
-      db.exec(SCHEMA);
-      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    // Read again inside the lock: another process may have migrated meanwhile.
+    for (let applied = version(); applied < MIGRATIONS.length; applied++) {
+      db.exec(MIGRATIONS[applied]);
+      db.exec(`PRAGMA user_version = ${applied + 1}`);
     }
     db.exec("COMMIT");
   } catch (error) {
@@ -335,14 +559,24 @@ function migrate(db: DatabaseSync): void {
 export function wipeAllData(): void {
   tx(() => {
     for (const table of [
+      "razorpay_webhook_events",
+      "online_applications",
+      "expense_claims",
       "transactions",
       "orders",
+      "checkouts",
+      "product_images",
       "product_variants",
       "products",
       "tickets",
       "tasks",
       "announcements",
       "events",
+      "membership_applications",
+      "files",
+      "account_setup_tokens",
+      "member_sessions",
+      "member_accounts",
       "membership_periods",
       "members",
       "sessions",

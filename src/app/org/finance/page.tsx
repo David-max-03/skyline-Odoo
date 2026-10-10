@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { Check, Pencil, Plus, Wallet } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, Check, Equal, Minus, Pencil, Plus, Wallet } from "lucide-react";
 import { Suspense, useMemo, useState, type FormEvent } from "react";
 import { CashflowChart } from "@/components/charts";
 import { Money, TransactionStatusBadge } from "@/components/domain";
@@ -17,14 +17,16 @@ import {
   ErrorState,
   FormError,
   LoadingBlock,
-  Notice,
   PageHeader,
   SelectField,
-  Stat,
+  Skeleton,
+  StatSkeleton,
   Table,
+  TableSkeleton,
   Td,
   TextField,
   Th,
+  cn,
 } from "@/components/ui";
 import { api, errorMessage, useApi } from "@/lib/api-client";
 import {
@@ -127,38 +129,84 @@ function FinanceLedger() {
           <ErrorState message={summary.error.message} onRetry={summary.reload} />
         </Card>
       ) : !s ? (
-        <Card className="mb-6">
-          <LoadingBlock label="Loading totals" rows={2} />
-        </Card>
+        <div className="mb-6 space-y-5">
+          <Skeleton className="h-56 !rounded-card" />
+          <StatSkeleton count={2} />
+        </div>
       ) : (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <Stat label="Collected" tone="ok" icon={Wallet} value={<Money cents={s.incomeSettledCents} />} detail="Income actually received" />
-            <Stat label="Paid out" tone="neutral" icon={Wallet} value={<Money cents={s.expenseSettledCents} />} detail="Expenses actually paid" />
-            <Stat
-              label="What is left"
-              tone={s.netCents < 0 ? "bad" : "brand"}
-              icon={Wallet}
-              value={<Money cents={s.netCents} />}
-              detail="Collected − paid out"
-            />
-            <Stat
-              label="Pending"
-              tone="warn"
-              icon={Wallet}
-              value={<Money cents={s.incomePendingCents - s.expensePendingCents} signed />}
-              detail={
-                <>
-                  <Money cents={s.incomePendingCents} /> to collect · <Money cents={s.expensePendingCents} /> to pay
-                </>
-              }
-            />
-          </div>
-          <Notice tone="neutral" className="mt-3">
-            If every pending item settles as recorded, the balance would be <Money cents={s.projectedNetCents} className="font-semibold text-ink" />. <Badge tone="warn">Estimate</Badge>
-          </Notice>
+          {/* The statement: what came in, what went out, what is left. Read left to right. */}
+          <Card aria-labelledby="statement-heading" className="overflow-hidden">
+            <h2 id="statement-heading" className="sr-only">
+              Statement
+            </h2>
+            <div className="grid items-stretch md:grid-cols-[1fr_auto_1fr_auto_1.15fr]">
+              <div className="p-5 sm:p-6">
+                <p className="flex items-center gap-2 text-[0.8125rem] font-medium text-muted">
+                  <span className="flex size-7 items-center justify-center rounded-lg bg-ok-soft text-ok-strong">
+                    <ArrowDownLeft className="size-4" aria-hidden />
+                  </span>
+                  Collected
+                </p>
+                <p className="num mt-3 font-display text-[1.75rem] font-bold leading-none text-ink">
+                  <Money cents={s.incomeSettledCents} />
+                </p>
+                <p className="mt-2 text-[0.8125rem] text-muted">Income actually received</p>
+              </div>
+              <div className="hidden items-center text-subtle md:flex" aria-hidden>
+                <Minus className="size-5" />
+              </div>
+              <div className="border-t border-line p-5 sm:p-6 md:border-t-0">
+                <p className="flex items-center gap-2 text-[0.8125rem] font-medium text-muted">
+                  <span className="flex size-7 items-center justify-center rounded-lg bg-sunken text-body">
+                    <ArrowUpRight className="size-4" aria-hidden />
+                  </span>
+                  Paid out
+                </p>
+                <p className="num mt-3 font-display text-[1.75rem] font-bold leading-none text-ink">
+                  <Money cents={s.expenseSettledCents} />
+                </p>
+                <p className="mt-2 text-[0.8125rem] text-muted">Expenses actually paid</p>
+              </div>
+              <div className="hidden items-center pr-5 text-subtle md:flex" aria-hidden>
+                <Equal className="size-5" />
+              </div>
+              <div className="bg-night p-5 sm:p-6">
+                <p className="flex items-center gap-2 text-[0.8125rem] font-semibold uppercase tracking-wider text-on-night-muted">
+                  <Wallet className="size-4 text-accent" aria-hidden />
+                  What is left
+                </p>
+                <p className="num mt-3 font-display text-[2.25rem] font-extrabold leading-none text-white">
+                  <Money cents={s.netCents} />
+                </p>
+                <p className="mt-2 text-[0.8125rem] text-on-night-muted">Collected minus paid out. Pending items are not counted.</p>
+              </div>
+            </div>
+            <dl className="grid gap-px border-t border-line bg-line sm:grid-cols-3">
+              <div className="bg-surface px-5 py-4 sm:px-6">
+                <dt className="text-[0.8125rem] font-medium text-muted">Still to collect</dt>
+                <dd className="num mt-1 font-display text-xl font-bold text-ink">
+                  <Money cents={s.incomePendingCents} />
+                </dd>
+              </div>
+              <div className="bg-surface px-5 py-4 sm:px-6">
+                <dt className="text-[0.8125rem] font-medium text-muted">Still to pay</dt>
+                <dd className="num mt-1 font-display text-xl font-bold text-ink">
+                  <Money cents={s.expensePendingCents} />
+                </dd>
+              </div>
+              <div className="bg-surface px-5 py-4 sm:px-6">
+                <dt className="flex items-center gap-2 text-[0.8125rem] font-medium text-muted">
+                  If every pending item settles <Badge tone="warn">Estimate</Badge>
+                </dt>
+                <dd className="num mt-1 font-display text-xl font-bold text-ink">
+                  <Money cents={s.projectedNetCents} />
+                </dd>
+              </div>
+            </dl>
+          </Card>
 
-          <div className="mt-6 grid gap-4 xl:grid-cols-5">
+          <div className="mt-5 grid gap-5 xl:grid-cols-5">
             <Card className="xl:col-span-2">
               <CardHeader title="By month" description="Collected and paid amounts only." />
               <div className="p-5">
@@ -166,37 +214,14 @@ function FinanceLedger() {
               </div>
             </Card>
             <Card className="xl:col-span-3">
-              <CardHeader title="Where the money came from and went" description="By category. Pending amounts are listed beside the settled ones." />
+              <CardHeader title="Where the money came from and went" description="Settled amounts by category. Anything still pending is noted beside it." />
               {s.byCategory.length === 0 ? (
                 <EmptyState icon={Wallet} title="No entries yet" />
               ) : (
-                <Table>
-                  <thead>
-                    <tr>
-                      <Th>Category</Th>
-                      <Th align="right">Entries</Th>
-                      <Th align="right">Settled</Th>
-                      <Th align="right">Pending</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {s.byCategory.map((c) => (
-                      <tr key={`${c.type}-${c.category}`}>
-                        <Td>
-                          <span className="font-medium text-ink">{CATEGORY_LABELS[c.category]}</span>{" "}
-                          <span className="text-xs text-muted">{c.type === "income" ? "in" : "out"}</span>
-                        </Td>
-                        <Td align="right">{c.count}</Td>
-                        <Td align="right">
-                          <Money cents={c.type === "income" ? c.settledCents : -c.settledCents} signed />
-                        </Td>
-                        <Td align="right" className="text-muted">
-                          {c.pendingCents === 0 ? "—" : <Money cents={c.pendingCents} />}
-                        </Td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </Table>
+                <div className="grid gap-x-8 gap-y-6 p-5 md:grid-cols-2">
+                  <CategoryBars title="Money in" rows={s.byCategory.filter((c) => c.type === "income")} color="var(--chart-1)" />
+                  <CategoryBars title="Money out" rows={s.byCategory.filter((c) => c.type === "expense")} color="var(--chart-2)" />
+                </div>
               )}
             </Card>
           </div>
@@ -229,7 +254,7 @@ function FinanceLedger() {
         {ledger.error && !ledger.data ? (
           <ErrorState message={ledger.error.message} onRetry={ledger.reload} />
         ) : !ledger.data ? (
-          <LoadingBlock label="Loading ledger" rows={6} />
+          <TableSkeleton label="Loading ledger" rows={6} />
         ) : ledger.data.length === 0 ? (
           <EmptyState
             icon={Wallet}
@@ -238,7 +263,7 @@ function FinanceLedger() {
           />
         ) : (
           <>
-            <Table>
+            <Table stack>
               <thead>
                 <tr>
                   <Th>Date</Th>
@@ -246,27 +271,37 @@ function FinanceLedger() {
                   <Th>Category</Th>
                   <Th>Status</Th>
                   <Th align="right">Amount</Th>
-                  <Th />
+                  <Th>
+                    <span className="sr-only">Actions</span>
+                  </Th>
                 </tr>
               </thead>
               <tbody>
                 {ledger.data.map((t) => (
-                  <tr key={t.id} className="hover:bg-sunken/50">
-                    <Td className="whitespace-nowrap text-muted">{formatDate(t.occurredOn)}</Td>
-                    <Td className="max-w-xs">
+                  <tr key={t.id} className="transition-colors hover:bg-sunken/50">
+                    <Td label="Date" className="whitespace-nowrap text-muted">
+                      {formatDate(t.occurredOn)}
+                    </Td>
+                    <Td layout="lead" className="sm:max-w-xs max-sm:order-first">
                       <div className="font-medium text-ink">{t.description}</div>
                       <div className="text-[0.8125rem] text-muted">
                         {[t.counterparty, t.eventTitle, SOURCE_LABELS[t.source]].filter(Boolean).join(" · ")}
                       </div>
                     </Td>
-                    <Td className="text-muted">{CATEGORY_LABELS[t.category]}</Td>
-                    <Td>
+                    <Td label="Category" className="text-muted">
+                      {CATEGORY_LABELS[t.category]}
+                    </Td>
+                    <Td label="Status">
                       <TransactionStatusBadge type={t.type} status={t.status} />
                     </Td>
-                    <Td align="right">
-                      <Money cents={t.type === "income" ? t.amountCents : -t.amountCents} signed className="font-medium text-ink" />
+                    <Td label="Amount" align="right">
+                      <Money
+                        cents={t.type === "income" ? t.amountCents : -t.amountCents}
+                        signed
+                        className={cn("font-semibold", t.type === "income" ? "text-ok-strong" : "text-ink")}
+                      />
                     </Td>
-                    <Td>
+                    <Td layout="actions">
                       {canManage && (
                         <div className="flex justify-end gap-1">
                           {t.status === "pending" && (
@@ -358,6 +393,61 @@ function FinanceLedger() {
         )}
       </Dialog>
     </>
+  );
+}
+
+/**
+ * One direction of the category breakdown as labelled bars. Bar length shows
+ * each category's share of the largest one; the amounts are always in text.
+ */
+function CategoryBars({
+  title,
+  rows,
+  color,
+}: {
+  title: string;
+  rows: FinanceSummary["byCategory"];
+  color: string;
+}) {
+  // Longest bar first, so the list reads as a ranking. Display order only.
+  rows = rows.toSorted((a, b) => b.settledCents - a.settledCents);
+  const largest = Math.max(1, ...rows.map((r) => r.settledCents));
+  return (
+    <section aria-label={title}>
+      <h3 className="mb-3 flex items-center gap-2 text-[0.8125rem] font-semibold uppercase tracking-wide !text-muted">
+        <span className="size-2.5 rounded-sm" style={{ background: color }} aria-hidden />
+        {title}
+      </h3>
+      {rows.length === 0 ? (
+        <p className="text-sm text-muted">Nothing recorded.</p>
+      ) : (
+        <ul className="space-y-3.5">
+          {rows.map((row) => (
+            <li key={row.category}>
+              <div className="flex items-baseline justify-between gap-3 text-sm">
+                <span className="min-w-0 truncate font-medium text-ink">{CATEGORY_LABELS[row.category]}</span>
+                <Money cents={row.settledCents} className="font-semibold text-ink" />
+              </div>
+              <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-sunken" aria-hidden>
+                <div
+                  className="h-full rounded-full"
+                  style={{ width: `${Math.max(row.settledCents > 0 ? 2 : 0, (row.settledCents / largest) * 100)}%`, background: color }}
+                />
+              </div>
+              <p className="mt-1 text-xs text-muted">
+                {row.count} {row.count === 1 ? "entry" : "entries"}
+                {row.pendingCents > 0 && (
+                  <>
+                    {" · "}
+                    <Money cents={row.pendingCents} /> pending
+                  </>
+                )}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

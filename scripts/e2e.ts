@@ -9,6 +9,8 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any -- responses are untyped JSON here on purpose; each field used is asserted */
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import http from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -20,6 +22,91 @@ const PORT = Number(process.env.E2E_PORT ?? 3217);
 const BASE = `http://127.0.0.1:${PORT}`;
 const ROOT = path.resolve(__dirname, "..");
 const PASSWORD = "e2e-password-1";
+
+// A stand-in for Razorpay's API on this machine. The keys are made up; the
+// server under test is pointed here, so no request ever reaches Razorpay.
+const FAKE_RAZORPAY_PORT = PORT + 1;
+const RAZORPAY_KEY_ID = "rzp_test_E2eCheckKey0001";
+const RAZORPAY_KEY_SECRET = "e2e-key-secret-not-real";
+const RAZORPAY_WEBHOOK_SECRET = "e2e-webhook-secret-not-real";
+
+interface FakePayment {
+  id: string;
+  order_id: string;
+  amount: number;
+  currency: string;
+  status: string;
+  method: string;
+}
+const fakeRazorpay = {
+  server: null as http.Server | null,
+  orders: new Map<string, { id: string; amount: number; currency: string; status: string }>(),
+  payments: new Map<string, FakePayment>(),
+  counter: 0,
+  unauthenticated: 0,
+  nextId(prefix: string): string {
+    return `${prefix}_E2e${String(++this.counter).padStart(10, "0")}`;
+  },
+  /** Records a payment the way Razorpay would after the applicant pays an order. */
+  pay(orderId: string, overrides: Partial<FakePayment> = {}): FakePayment {
+    const order = this.orders.get(orderId);
+    assert.ok(order, `the fake has no order ${orderId}`);
+    const payment = { id: this.nextId("pay"), order_id: orderId, amount: order.amount, currency: order.currency, status: "captured", method: "upi", ...overrides };
+    this.payments.set(payment.id, payment);
+    return payment;
+  },
+  start(): Promise<void> {
+    const expected = `Basic ${Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString("base64")}`;
+    this.server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        const send = (status: number, body: unknown) => {
+          res.writeHead(status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(body));
+        };
+        if (req.headers.authorization !== expected) {
+          this.unauthenticated += 1;
+          return send(401, { error: { code: "BAD_REQUEST_ERROR", description: "Authentication failed" } });
+        }
+        const url = req.url ?? "";
+        const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+        let match: RegExpMatchArray | null;
+        if (req.method === "POST" && url === "/v1/orders") {
+          const order = { id: this.nextId("order"), amount: body.amount, currency: body.currency, status: "created" };
+          this.orders.set(order.id, order);
+          return send(200, { ...order, entity: "order", receipt: body.receipt });
+        }
+        if (req.method === "GET" && (match = url.match(/^\/v1\/orders\/(order_\w+)\/payments$/))) {
+          return send(200, { entity: "collection", items: [...this.payments.values()].filter((p) => p.order_id === match![1]) });
+        }
+        if (req.method === "GET" && (match = url.match(/^\/v1\/payments\/(pay_\w+)$/))) {
+          const payment = this.payments.get(match[1]);
+          return payment ? send(200, payment) : send(400, { error: { code: "BAD_REQUEST_ERROR" } });
+        }
+        return send(404, { error: { code: "NOT_FOUND" } });
+      });
+    });
+    return new Promise((resolve) => this.server!.listen(FAKE_RAZORPAY_PORT, "127.0.0.1", () => resolve()));
+  },
+  stop(): void {
+    this.server?.close();
+    this.server = null;
+  },
+};
+
+const signHex = (secret: string, message: string) => createHmac("sha256", secret).update(message).digest("hex");
+
+/** Delivers a webhook the way Razorpay does: a raw JSON body, signed, with an event id. */
+async function deliverWebhook(type: string, payment: FakePayment, eventId: string, secret = RAZORPAY_WEBHOOK_SECRET) {
+  const body = JSON.stringify({ entity: "event", event: type, payload: { payment: { entity: payment } } });
+  const response = await fetch(`${BASE}/api/webhooks/razorpay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Razorpay-Signature": signHex(secret, body), "x-razorpay-event-id": eventId },
+    body,
+  });
+  return { status: response.status, body: (await response.json()) as any };
+}
 
 interface Reply<T = any> {
   status: number;
@@ -52,6 +139,29 @@ class Client {
   post = <T = any>(route: string, body: unknown = {}) => this.call<T>("POST", route, body);
   patch = <T = any>(route: string, body: unknown) => this.call<T>("PATCH", route, body);
 
+  private auth(): Record<string, string> {
+    return { ...(this.cookie ? { Cookie: this.cookie } : {}), ...this.headers };
+  }
+
+  /** Posts a multipart form, optionally with one file, the way the browser does for uploads. */
+  async form<T = any>(
+    route: string,
+    fields: Record<string, string>,
+    file?: { field: string; bytes: Uint8Array<ArrayBuffer>; type: string; name: string },
+  ): Promise<Reply<T>> {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(fields)) form.set(key, value);
+    if (file) form.set(file.field, new Blob([file.bytes], { type: file.type }), file.name);
+    const response = await fetch(BASE + route, { method: "POST", headers: this.auth(), body: form, redirect: "manual" });
+    const payload = (await response.json().catch(() => ({}))) as { data?: T; error?: Reply["error"] };
+    return { status: response.status, data: payload.data as T, error: payload.error ?? null };
+  }
+
+  /** A GET that returns the raw response, for endpoints that do not answer with JSON. */
+  raw(route: string): Promise<Response> {
+    return fetch(BASE + route, { headers: this.auth(), redirect: "manual" });
+  }
+
   async signIn(email: string): Promise<this> {
     const reply = await this.post("/api/auth/login", { email, password: PASSWORD });
     assert.equal(reply.status, 200, `sign-in failed for ${email}`);
@@ -64,7 +174,18 @@ let server: ChildProcess | null = null;
 async function startServer(dbPath: string): Promise<void> {
   server = spawn(process.execPath, [path.join(ROOT, "node_modules/next/dist/bin/next"), "start", "-p", String(PORT)], {
     cwd: ROOT,
-    env: { ...process.env, NODE_ENV: "production", SKYLINE_DB_PATH: dbPath, SKYLINE_DISABLE_RATE_LIMIT: "1" },
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      SKYLINE_DB_PATH: dbPath,
+      SKYLINE_DISABLE_RATE_LIMIT: "1",
+      // Set here so nothing in a local .env file can point this run at the real Razorpay.
+      SKYLINE_RAZORPAY_MODE: "test",
+      SKYLINE_RAZORPAY_KEY_ID: RAZORPAY_KEY_ID,
+      SKYLINE_RAZORPAY_KEY_SECRET: RAZORPAY_KEY_SECRET,
+      SKYLINE_RAZORPAY_WEBHOOK_SECRET: RAZORPAY_WEBHOOK_SECRET,
+      SKYLINE_RAZORPAY_API_BASE: `http://127.0.0.1:${FAKE_RAZORPAY_PORT}/v1`,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -114,6 +235,7 @@ async function main(): Promise<void> {
   closeDb();
 
   console.log(`Skyline end-to-end check\n  database: ${dbPath}\n  server:   ${BASE}\n`);
+  await fakeRazorpay.start();
   await startServer(dbPath);
 
   const anon = new Client();
@@ -243,10 +365,12 @@ async function main(): Promise<void> {
   ok("an organizer cannot record income (403)");
   assert.equal((await treasurer.post("/api/transactions", { ...entry, type: "income", category: "sponsorship", amountCents: 200000, status: "settled", description: "Sponsor: Campus Café" })).status, 200);
   assert.equal((await treasurer.post("/api/transactions", { ...entry, type: "expense", category: "venue", amountCents: 150000, status: "settled", description: "Hall hire" })).status, 200);
-  const claim = await organizer.post("/api/transactions", { ...entry, type: "expense", category: "reimbursement", amountCents: 30000, status: "pending", description: "Decorations", counterparty: "Omar Organizer" });
+  const owed = { ...entry, type: "expense", category: "reimbursement", amountCents: 30000, status: "pending", description: "Decorations", counterparty: "Omar Organizer" };
+  assert.equal((await organizer.post("/api/transactions", owed)).status, 403);
+  const claim = await treasurer.post("/api/transactions", owed);
   assert.equal(claim.status, 200);
   assert.equal((await organizer.post(`/api/transactions/${claim.data.id}`, { action: "settle" })).status, 403);
-  ok("treasurer records income and an expense; organizer files a claim but cannot settle it");
+  ok("treasurer records income and expenses; an organizer cannot write to the ledger or settle anything");
 
   const detail = (await treasurer.get(`/api/events/${eventId}`)).data;
   const f = detail.event.finance;
@@ -271,22 +395,399 @@ async function main(): Promise<void> {
   assert.equal(dashboard.tickets.checkedIn, 2);
   ok("finance summary and dashboard agree with the event figures");
 
-  // --- 8. assistant ---------------------------------------------------------------
-  console.log("Assistant");
-  assert.equal((await anon.post("/api/assistant", { question: "What is our financial position?" })).status, 401);
-  const most = (await treasurer.post("/api/assistant", { question: "Which event has the most registrations?" })).data;
-  assert.equal(most.engine, "rules");
-  assert.ok(most.answer.includes("E2E Spring Gala has the most registrations: 5 of 5 seats (100% full)"), most.answer);
-  const position = (await treasurer.post("/api/assistant", { question: "What is the current financial position?" })).data;
-  assert.ok(position.answer.includes("collected ₹3,000") && position.answer.includes("net position is ₹1,500"), position.answer);
-  assert.ok(position.facts.some((x: any) => x.kind === "estimate") && position.facts.some((x: any) => x.kind === "actual"));
-  const breakEven = (await treasurer.post("/api/assistant", { question: "How many tickets must the Spring Gala sell to break even?" })).data;
+  // --- 8. event analysis ----------------------------------------------------------
+  console.log("Event analysis");
   // Costs 1,800 are fully covered by the 2,000 sponsorship.
-  assert.ok(breakEven.answer.includes("already breaks even without ticket sales"), breakEven.answer);
   assert.deepEqual(detail.breakEven.toCoverCents, 0);
-  const target = (await treasurer.post("/api/assistant", { question: "How much more revenue does the Spring Gala need to reach its profit target?" })).data;
-  assert.ok(target.answer.includes("already reached its profit target of ₹1,000"), target.answer);
-  ok("answers match the stored data and label actuals and estimates; engine reported as rule-based");
+  assert.equal(detail.breakEven.alreadyCovered, true);
+  assert.equal(detail.profitTarget.gapActualCents, 0);
+  ok("break-even and profit target on the event page come from the ledger");
+
+  // --- 9. membership applications and member accounts -----------------------------
+  console.log("Membership");
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+  const applicant = { name: "Mira Member", email: "mira@e2e.example", paymentMethod: "upi", paymentReference: "UTR 4455 6677" };
+  const noProof = await anon.form("/api/public/applications", applicant);
+  assert.equal(noProof.status, 422);
+  assert.ok(noProof.error?.fields?.evidence);
+  const fakeImage = await anon.form("/api/public/applications", applicant, {
+    field: "evidence",
+    bytes: new TextEncoder().encode("<script>alert(1)</script>"),
+    type: "image/png",
+    name: "proof.png",
+  });
+  assert.equal(fakeImage.status, 422);
+  ok("an application without a screenshot, or with a file that is not an image, is refused");
+
+  const applied = await anon.form("/api/public/applications", applicant, { field: "evidence", bytes: png, type: "image/png", name: "proof.png" });
+  assert.equal(applied.status, 200, JSON.stringify(applied.error));
+  assert.equal(applied.data.status, "pending");
+  assert.equal((await treasurer.get("/api/members")).data.length, 0);
+  assert.equal((await treasurer.get("/api/transactions?category=dues")).data.length, 0);
+  assert.equal((await new Client().post("/api/auth/login", { email: "mira@e2e.example", password: "anything-at-all" })).status, 401);
+  assert.equal((await anon.post("/api/public/applications/status", { code: applied.data.code, email: "mira@e2e.example" })).data.status, "pending");
+  assert.equal((await anon.post("/api/public/applications/status", { code: applied.data.code, email: "other@e2e.example" })).status, 404);
+  ok("applying creates a pending application only: no member, no dues in the ledger, no sign-in");
+
+  assert.equal((await anon.get("/api/applications")).status, 401);
+  assert.equal((await organizer.get("/api/applications")).status, 403);
+  const [pendingApp] = (await treasurer.get("/api/applications")).data;
+  const reviewRoute = `/api/applications/${pendingApp.id}`;
+  assert.equal((await organizer.post(reviewRoute, { action: "approve", paymentReceived: true })).status, 403);
+  assert.equal((await treasurer.post(reviewRoute, { action: "approve" })).status, 422);
+  assert.equal((await treasurer.post(reviewRoute, { action: "approve", paymentReceived: false })).status, 422);
+  assert.equal((await treasurer.get("/api/members")).data.length, 0);
+  ok("only the treasurer or president can review, and approval needs the payment confirmation");
+
+  const fileRoute = `/api/files/${pendingApp.evidenceFileId}`;
+  assert.equal((await anon.raw(fileRoute)).status, 401);
+  assert.equal((await organizer.raw(fileRoute)).status, 403);
+  const image = await treasurer.raw(fileRoute);
+  assert.equal(image.status, 200);
+  assert.equal(image.headers.get("content-type"), "image/png");
+  assert.equal(image.headers.get("x-content-type-options"), "nosniff");
+  assert.match(image.headers.get("cache-control") ?? "", /no-store/);
+  assert.deepEqual(new Uint8Array(await image.arrayBuffer()), png);
+  ok("the payment screenshot is served only to reviewers, as an image, uncached");
+
+  const approval = await treasurer.post(reviewRoute, { action: "approve", paymentReceived: true });
+  assert.equal(approval.status, 200, JSON.stringify(approval.error));
+  const memberNo: string = approval.data.application.memberNo;
+  assert.match(memberNo, /^SKY-M-\d{4}$/);
+  const dues = (await treasurer.get("/api/transactions?category=dues")).data;
+  assert.equal(dues.length, 1);
+  assert.equal(dues[0].status, "settled");
+  assert.equal(dues[0].amountCents, applied.data.amountCents);
+  assert.ok(dues[0].description.includes("UTR44556677"), dues[0].description);
+  assert.equal((await treasurer.post(reviewRoute, { action: "approve", paymentReceived: true })).status, 409);
+  assert.equal((await treasurer.get("/api/members")).data.length, 1);
+  ok("approval creates one member with a member ID and one settled dues entry; a second approval is refused");
+
+  const memberPassword = "e2e-member-password";
+  const token: string = approval.data.setup.path.split("/").pop();
+  assert.equal((await anon.post("/api/auth/setup/check", { token })).data.memberNo, memberNo);
+  assert.equal((await anon.post("/api/auth/setup", { token, password: "short" })).status, 422);
+  assert.equal((await new Client().post("/api/auth/login", { email: memberNo, password: "short" })).status, 401);
+  assert.equal((await anon.post("/api/auth/setup", { token, password: memberPassword })).status, 200);
+  assert.equal((await anon.post("/api/auth/setup", { token, password: "another-long-password" })).status, 400);
+  assert.equal((await anon.post("/api/auth/setup/check", { token })).status, 400);
+  ok("the setup link sets a password once and then stops working");
+
+  const member = new Client();
+  const signedIn = await member.post("/api/auth/login", { email: memberNo, password: memberPassword });
+  assert.equal(signedIn.status, 200);
+  assert.equal(signedIn.data.user.role, "member");
+  assert.equal((await member.get("/api/auth/me")).data.user.memberNo, memberNo);
+  const mine = (await member.get("/api/me")).data;
+  assert.equal(mine.memberNo, memberNo);
+  assert.equal(mine.status, "active");
+  ok("the member signs in with the member ID and sees their own record");
+
+  const memberId: string = approval.data.application.memberId;
+  for (const route of ["/api/dashboard", "/api/members", `/api/members/${memberId}`, "/api/transactions", "/api/finance/summary", "/api/orders", "/api/tasks", "/api/applications", "/api/events", `/api/events/${eventId}`]) {
+    assert.equal((await member.get(route)).status, 403, `GET ${route}`);
+  }
+  const forbiddenWrites: [string, unknown][] = [
+    ["/api/events", eventBody],
+    ["/api/tasks", { title: "Assign this to someone else", assignee: "Someone Else" }],
+    ["/api/transactions", { type: "income", category: "donation", amountCents: 100000, occurredOn: "2026-01-01", description: "Self-credit" }],
+    ["/api/tickets/check-in", { code }],
+    [`/api/events/${eventId}/registrations`, { name: "Desk Sale", email: "desk@e2e.example", payNow: "cash" }],
+    ["/api/members", { name: "A Friend", email: "friend@e2e.example", duesPaid: true }],
+    [`/api/members/${memberId}/setup-link`, {}],
+    [reviewRoute, { action: "approve", paymentReceived: true }],
+  ];
+  for (const [route, body] of forbiddenWrites) {
+    assert.equal((await member.post(route, body)).status, 403, `POST ${route}`);
+  }
+  assert.equal((await member.raw(fileRoute)).status, 403);
+  ok("a member account is refused by every committee endpoint, including creating events and assigning tasks");
+
+  assert.equal((await treasurer.get("/api/me")).status, 403);
+  assert.equal((await anon.get("/api/me")).status, 401);
+  const memberPage = await fetch(`${BASE}/member`, { redirect: "manual" });
+  assert.equal(memberPage.status, 307);
+  ok("member endpoints refuse committee accounts and anonymous callers; member pages redirect to sign-in");
+
+  // --- 10. volunteer tasks ----------------------------------------------------------
+  console.log("Tasks");
+  const taskForMember = (await organizer.post("/api/tasks", { title: "Hang the banner", assigneeMemberId: memberId, status: "done" })).data;
+  const taskForStaff = (await organizer.post("/api/tasks", { title: "Book the hall", assignee: "Omar Organizer" })).data;
+  assert.equal(taskForMember.status, "todo");
+  assert.equal(taskForMember.assignee, "Mira Member");
+  assert.equal((await organizer.patch(`/api/tasks/${taskForStaff.id}`, { status: "done" })).status, 422);
+  assert.equal((await organizer.patch(`/api/tasks/${taskForStaff.id}`, { action: "done" })).status, 409);
+  assert.equal((await organizer.patch(`/api/tasks/${taskForStaff.id}`, { action: "start" })).data.status, "in_progress");
+  ok("a task starts in To do, cannot be given a status directly, and only moves one legal step");
+
+  const myTasks = (await member.get("/api/me/tasks")).data;
+  assert.deepEqual(myTasks.map((t: any) => t.title), ["Hang the banner"]);
+  const mineRoute = `/api/me/tasks/${taskForMember.id}`;
+  assert.equal((await member.patch(mineRoute, { action: "reopen" })).status, 409);
+  assert.equal((await member.patch(mineRoute, { action: "start" })).data.status, "in_progress");
+  assert.equal((await member.patch(mineRoute, { action: "done" })).data.status, "done");
+  assert.equal((await member.patch(mineRoute, { action: "reopen" })).data.status, "in_progress");
+  ok("a member sees only their own tasks and moves them Start → Done → Reopen (back to In progress)");
+
+  assert.equal((await member.patch(`/api/me/tasks/${taskForStaff.id}`, { action: "done" })).status, 404);
+  assert.equal((await member.patch(`/api/tasks/${taskForMember.id}`, { action: "start" })).status, 403);
+  assert.equal((await member.call("PUT", `/api/tasks/${taskForMember.id}`, { title: "Hang the banner", assignee: "Someone Else" })).status, 403);
+  assert.equal((await member.call("DELETE", `/api/tasks/${taskForMember.id}`)).status, 403);
+  assert.equal((await organizer.get("/api/tasks")).data.find((t: any) => t.id === taskForStaff.id).status, "in_progress");
+  assert.equal((await organizer.get("/api/tasks")).data.find((t: any) => t.id === taskForMember.id).assigneeMemberId, memberId);
+  ok("a member cannot touch someone else's task, reassign, edit or delete");
+
+  // --- 11. expense claims -----------------------------------------------------------
+  console.log("Expense claims");
+  const admin = await new Client().signIn("admin@e2e.example");
+  const claimFields = { title: "Banner rope", amountCents: "25000", spentOn: today, category: "supplies", justification: "Needed to hang the stage banner." };
+  const receipt = { field: "evidence", bytes: png, type: "image/png", name: "receipt.png" };
+  assert.equal((await anon.form("/api/claims", claimFields, receipt)).status, 401);
+  const noPhoto = await member.form("/api/claims", claimFields);
+  assert.equal(noPhoto.status, 422);
+  assert.ok(noPhoto.error?.fields?.evidence);
+  assert.equal((await member.form("/api/claims", claimFields, { ...receipt, bytes: new TextEncoder().encode("not an image") })).status, 422);
+  const filed = await member.form("/api/claims", claimFields, receipt);
+  assert.equal(filed.status, 200, JSON.stringify(filed.error));
+  assert.equal(filed.data.status, "submitted");
+  ok("a claim needs a real photo; a volunteer member can file one");
+
+  const expensesBefore = (await treasurer.get("/api/finance/summary")).data;
+  const claimRoute = `/api/claims/${filed.data.id}`;
+  const receiptRoute = `/api/files/${filed.data.evidenceFileId}`;
+  assert.equal((await member.raw(receiptRoute)).status, 200);
+  assert.equal((await treasurer.raw(receiptRoute)).status, 200);
+  assert.equal((await organizer.raw(receiptRoute)).status, 403);
+  assert.equal((await anon.raw(receiptRoute)).status, 401);
+  assert.equal((await organizer.get("/api/claims")).data.claims.length, 0);
+  assert.equal((await treasurer.get("/api/claims")).data.claims.length, 1);
+  ok("the receipt and the claim are visible to the claimant and the reviewers only");
+
+  assert.equal((await member.post(claimRoute, { action: "approve" })).status, 403);
+  assert.equal((await organizer.post(claimRoute, { action: "approve" })).status, 403);
+  assert.equal((await treasurer.post(claimRoute, { action: "pay", method: "upi" })).status, 409);
+  assert.equal((await treasurer.post(claimRoute, { action: "approve" })).data.status, "approved");
+  assert.equal((await admin.post(claimRoute, { action: "approve" })).status, 409);
+  const afterApproval = (await treasurer.get("/api/finance/summary")).data;
+  assert.equal(afterApproval.expensePendingCents, expensesBefore.expensePendingCents + 25000);
+  assert.equal(afterApproval.expenseSettledCents, expensesBefore.expenseSettledCents);
+  assert.equal((await treasurer.post(claimRoute, { action: "pay", method: "upi" })).data.status, "paid");
+  const afterPayment = (await treasurer.get("/api/finance/summary")).data;
+  assert.equal(afterPayment.expensePendingCents, expensesBefore.expensePendingCents);
+  assert.equal(afterPayment.expenseSettledCents, expensesBefore.expenseSettledCents + 25000);
+  assert.equal(afterPayment.transactionCount, expensesBefore.transactionCount + 1);
+  assert.equal((await member.get("/api/claims")).data.claims[0].status, "paid");
+  ok("only a reviewer can approve; approval adds one unpaid ledger entry and payment settles that same entry");
+
+  const own = await treasurer.form("/api/claims", { ...claimFields, title: "Receipt book" }, receipt);
+  assert.equal((await treasurer.post(`/api/claims/${own.data.id}`, { action: "approve" })).status, 403);
+  assert.equal((await admin.post(`/api/claims/${own.data.id}`, { action: "reject", reason: "Bought without asking" })).data.status, "rejected");
+  ok("a reviewer cannot approve their own claim; another reviewer can reject it with a reason");
+
+  // --- 12. member events, tickets, profile and password -----------------------------
+  console.log("Member portal");
+  const memberEvent = (await organizer.post("/api/events", { ...eventBody, title: "E2E Member Night", capacity: 1 })).data;
+  await organizer.post(`/api/events/${memberEvent.id}/status`, { status: "published" });
+  assert.equal((await anon.post(`/api/me/events/${memberEvent.id}/register`, {})).status, 401);
+  assert.equal((await organizer.post(`/api/me/events/${memberEvent.id}/register`, {})).status, 403);
+  const myTicket = await member.post(`/api/me/events/${memberEvent.id}/register`, { name: "Someone Else", email: "other@e2e.example", priceCents: 0 });
+  assert.equal(myTicket.status, 200, JSON.stringify(myTicket.error));
+  assert.equal(myTicket.data.paymentStatus, "pending");
+  assert.equal(myTicket.data.priceCents, eventBody.memberPriceCents);
+  assert.equal((await member.post(`/api/me/events/${memberEvent.id}/register`, {})).status, 409);
+  const mineNow = (await member.get("/api/me")).data;
+  assert.equal(mineNow.tickets[0].code, myTicket.data.code);
+  assert.equal((await new Client().get(`/api/public/tickets/${myTicket.data.code}`)).data.attendeeName, "Mira Member");
+  ok("a member registers as themselves at the server's price; the ticket is unpaid until staff record payment");
+
+  assert.equal((await member.post(`/api/me/tickets/${code}/cancel`, {})).status, 404);
+  assert.equal((await member.post(`/api/me/tickets/${myTicket.data.code}/cancel`, {})).data.status, "cancelled");
+  assert.equal((await member.post(`/api/me/events/${memberEvent.id}/register`, {})).status, 200);
+  ok("a member can cancel only their own unpaid ticket, which frees the seat");
+
+  const profile = await member.patch("/api/me", { phone: "98765 43210", studentId: "E2E-1", name: "Root", email: "root@e2e.example", role: "admin" });
+  assert.equal(profile.data.phone, "98765 43210");
+  assert.equal(profile.data.name, "Mira Member");
+  assert.equal(profile.data.email, "mira@e2e.example");
+  assert.equal((await member.get("/api/auth/me")).data.user.role, "member");
+  assert.ok((await member.get("/api/me/payments")).data.length >= 2);
+  assert.equal((await treasurer.get("/api/me/payments")).status, 403);
+  assert.equal((await member.get("/api/me/announcements")).status, 200);
+  ok("a member edits only their own phone and student ID, and reads only their own payment records");
+
+  const otherDevice = new Client();
+  await otherDevice.post("/api/auth/login", { email: memberNo, password: memberPassword });
+  assert.equal((await member.post("/api/me/password", { currentPassword: "wrong-password-1", newPassword: "changed-e2e-password" })).status, 422);
+  assert.equal((await member.post("/api/me/password", { currentPassword: memberPassword, newPassword: "changed-e2e-password" })).status, 200);
+  assert.equal((await member.get("/api/me")).status, 200);
+  assert.equal((await otherDevice.get("/api/me")).status, 401);
+  assert.equal((await new Client().post("/api/auth/login", { email: memberNo, password: memberPassword })).status, 401);
+  ok("changing the password needs the current one and signs other devices out");
+
+  // --- 13. the shop -----------------------------------------------------------------
+  console.log("Shop");
+  const shopProduct = (
+    await treasurer.post("/api/products", { name: "E2E Hoodie", category: "apparel", description: "Warm.", priceCents: 120000, memberPriceCents: 100000, active: true, variants: [{ size: "M", stock: 2 }, { size: "L", stock: 5 }] })
+  ).data;
+  const sizeM = shopProduct.variants[0].id;
+  const sizeL = shopProduct.variants[1].id;
+  assert.equal((await organizer.form(`/api/products/${shopProduct.id}/images`, {}, { field: "image", bytes: png, type: "image/png", name: "hoodie.png" })).status, 403);
+  const withPhoto = await treasurer.form(`/api/products/${shopProduct.id}/images`, {}, { field: "image", bytes: png, type: "image/png", name: "hoodie.png" });
+  assert.equal(withPhoto.status, 200, JSON.stringify(withPhoto.error));
+  const photo = await anon.raw(withPhoto.data.images[0].url);
+  assert.equal(photo.status, 200);
+  assert.equal(photo.headers.get("content-type"), "image/png");
+  // A private receipt is not reachable through the public photo route.
+  assert.equal((await anon.raw(`/api/public/product-images/${filed.data.evidenceFileId}`)).status, 404);
+  const listed = (await anon.get("/api/public/products")).data.find((p: any) => p.id === shopProduct.id);
+  assert.equal(listed.images.length, 1);
+  assert.equal((await anon.get(`/api/public/products/${shopProduct.id}`)).data.variants.length, 2);
+  ok("staff manage products and photos; the public sees the catalogue, and private uploads stay private");
+
+  const shopper = { name: "Gita Guest", email: "gita@e2e.example" };
+  const tampered = await anon.post("/api/public/checkout", { ...shopper, items: [{ variantId: sizeM, quantity: 1, unitPriceCents: 1, totalCents: 1 }], totalCents: 1, paymentStatus: "paid" });
+  assert.equal(tampered.status, 200, JSON.stringify(tampered.error));
+  assert.equal(tampered.data.totalCents, 120000);
+  assert.equal(tampered.data.lines[0].paymentStatus, "pending");
+  assert.equal((await anon.post("/api/public/checkout", { ...shopper, items: [{ variantId: sizeM, quantity: 0 }] })).status, 422);
+  assert.equal((await anon.post("/api/public/checkout", { ...shopper, items: [] })).status, 422);
+  ok("the server prices the order and marks it unpaid whatever the browser sends; bad quantities are refused");
+
+  // Two buyers want two each of a size with one left: at most one unit can go, so both are refused.
+  const shortfall = await anon.post("/api/public/checkout", { ...shopper, items: [{ variantId: sizeL, quantity: 1 }, { variantId: sizeM, quantity: 2 }] });
+  assert.equal(shortfall.status, 409);
+  assert.equal(shortfall.error?.code, "out_of_stock");
+  let stock = (await treasurer.get("/api/products")).data.find((p: any) => p.id === shopProduct.id).variants;
+  assert.deepEqual(stock.map((v: any) => v.stock), [1, 5]);
+  const stockRace = await Promise.all(
+    Array.from({ length: 6 }, (_, i) => new Client().post("/api/public/checkout", { name: `Racer ${i}`, email: `racer${i}@e2e.example`, items: [{ variantId: sizeM, quantity: 1 }] })),
+  );
+  assert.equal(stockRace.filter((r) => r.status === 200).length, 1);
+  assert.equal(stockRace.filter((r) => r.status === 409).length, 5);
+  stock = (await treasurer.get("/api/products")).data.find((p: any) => p.id === shopProduct.id).variants;
+  assert.deepEqual(stock.map((v: any) => v.stock), [0, 5]);
+  ok("a cart is all-or-nothing, and six simultaneous buyers of the last unit produce exactly one order");
+
+  const memberOrder = await member.post("/api/me/checkout", { items: [{ variantId: sizeL, quantity: 2 }], name: "Someone Else", email: "other@e2e.example" });
+  assert.equal(memberOrder.status, 200, JSON.stringify(memberOrder.error));
+  assert.equal(memberOrder.data.totalCents, 200000);
+  assert.equal(memberOrder.data.buyerName, "Mira Member");
+  assert.equal((await anon.post("/api/me/checkout", { items: [{ variantId: sizeL, quantity: 1 }] })).status, 401);
+  assert.equal((await treasurer.post("/api/me/checkout", { items: [{ variantId: sizeL, quantity: 1 }] })).status, 403);
+  const history = (await member.get("/api/me/orders")).data;
+  assert.deepEqual(history.map((o: any) => o.code), [memberOrder.data.code]);
+  assert.equal((await anon.get("/api/me/orders")).status, 401);
+  const lineId = memberOrder.data.lines[0].orderId;
+  assert.equal((await member.post(`/api/orders/${lineId}`, { action: "pay", method: "upi" })).status, 403);
+  assert.equal((await treasurer.post(`/api/orders/${lineId}`, { action: "fulfil" })).status, 409);
+  assert.equal((await treasurer.post(`/api/orders/${lineId}`, { action: "pay", method: "upi" })).data.order.paymentStatus, "paid");
+  await treasurer.patch(`/api/products/${shopProduct.id}`, { name: "E2E Hoodie v2", category: "apparel", description: "", priceCents: 999900, memberPriceCents: 999900, active: true });
+  const afterEdit = (await member.get("/api/me/orders")).data[0];
+  assert.equal(afterEdit.lines[0].productName, "E2E Hoodie");
+  assert.equal(afterEdit.lines[0].unitPriceCents, 100000);
+  assert.equal(afterEdit.unpaidCents, 0);
+  ok("a member orders as themselves at the member price, sees only their own history, cannot mark it paid, and old orders keep their price");
+
+  const resetLink = await treasurer.post(`/api/members/${memberId}/setup-link`, {});
+  assert.equal(resetLink.status, 200);
+  assert.equal((await anon.post("/api/auth/setup", { token: resetLink.data.path.split("/").pop(), password: "a-second-e2e-password" })).status, 200);
+  assert.equal((await member.get("/api/me")).status, 401);
+  assert.equal((await new Client().post("/api/auth/login", { email: memberNo, password: memberPassword })).status, 401);
+  assert.equal((await new Client().post("/api/auth/login", { email: "mira@e2e.example", password: "a-second-e2e-password" })).status, 200);
+  ok("a password reset link signs the member out everywhere and replaces the old password");
+
+  // --- paying the membership fee online ---------------------------------------------
+  console.log("Online membership payment (Razorpay stand-in, test mode)");
+  const onlineRoute = "/api/public/membership/online";
+  const membersBefore: number = (await treasurer.get("/api/members")).data.length;
+  const duesBefore: number = (await treasurer.get("/api/transactions?category=dues")).data.length;
+  const memberCount = async () => (await treasurer.get("/api/members")).data.length as number;
+  const confirmBody = (app: any, payment: FakePayment, signature?: string) => ({
+    action: "confirm",
+    token: app.accessToken,
+    razorpayOrderId: app.checkout.orderId,
+    razorpayPaymentId: payment.id,
+    razorpaySignature: signature ?? signHex(RAZORPAY_KEY_SECRET, `${app.checkout.orderId}|${payment.id}`),
+  });
+
+  assert.equal((await anon.get("/api/public/membership")).data.online.available, true);
+  const started = await anon.post(onlineRoute, { name: "Omar Online", email: "omar@e2e.example", phone: "9999900001" });
+  assert.equal(started.status, 200, JSON.stringify(started.error));
+  assert.equal(started.data.status, "pending");
+  assert.equal(started.data.checkout.keyId, RAZORPAY_KEY_ID);
+  assert.equal(started.data.checkout.amountCents, 50000);
+  assert.equal(fakeRazorpay.orders.get(started.data.checkout.orderId)?.amount, 50000);
+  assert.ok(!JSON.stringify(started.data).includes(RAZORPAY_KEY_SECRET));
+  assert.equal(await memberCount(), membersBefore);
+  ok("starting an online application creates a Razorpay order for the fee, and no member");
+
+  const omarPayment = fakeRazorpay.pay(started.data.checkout.orderId);
+  const omarRoute = `${onlineRoute}/${started.data.id}`;
+  assert.equal((await anon.post(omarRoute, confirmBody(started.data, omarPayment, "0".repeat(64)))).status, 400);
+  assert.equal((await anon.post(omarRoute, { ...confirmBody(started.data, omarPayment), token: "x".repeat(43) })).status, 404);
+  assert.equal((await anon.post(omarRoute, { action: "resume" })).status, 422);
+  assert.equal(await memberCount(), membersBefore);
+  ok("a forged signature, a wrong access token or a missing one activates nothing");
+
+  const confirmed = await anon.post(omarRoute, confirmBody(started.data, omarPayment));
+  assert.equal(confirmed.status, 200, JSON.stringify(confirmed.error));
+  assert.equal(confirmed.data.status, "activated");
+  assert.match(confirmed.data.setup.path, /^\/activate\//);
+  assert.equal(await memberCount(), membersBefore + 1);
+  const duesAfter = (await treasurer.get("/api/transactions?category=dues")).data;
+  assert.equal(duesAfter.length, duesBefore + 1);
+  const omarDues = duesAfter.find((t: any) => t.description.includes(omarPayment.id));
+  assert.equal(omarDues.status, "settled");
+  assert.equal(omarDues.amountCents, 50000);
+  const onlineApplication = (await treasurer.get("/api/applications")).data.find((a: any) => a.code === started.data.code);
+  assert.equal(onlineApplication.channel, "razorpay");
+  assert.equal(onlineApplication.status, "approved");
+  ok("a payment verified with Razorpay creates the member, one settled dues entry and an approved application");
+
+  assert.equal((await anon.post(omarRoute, confirmBody(started.data, omarPayment))).data.setup, null);
+  assert.equal(await memberCount(), membersBefore + 1);
+  assert.equal((await treasurer.get("/api/transactions?category=dues")).data.length, duesBefore + 1);
+  const omarToken: string = confirmed.data.setup.path.split("/").pop();
+  assert.equal((await anon.post("/api/auth/setup", { token: omarToken, password: "omar-e2e-password-1" })).status, 200);
+  assert.equal((await anon.post("/api/auth/setup", { token: omarToken, password: "omar-e2e-password-2" })).status, 400);
+  assert.equal((await new Client().post("/api/auth/login", { email: "omar@e2e.example", password: "omar-e2e-password-1" })).status, 200);
+  ok("confirming twice changes nothing, and the password link works once");
+
+  // The browser closes after paying; only the webhook reaches the server.
+  const wanda = await anon.post(onlineRoute, { name: "Wanda Webhook", email: "wanda@e2e.example" });
+  const wandaPayment = fakeRazorpay.pay(wanda.data.checkout.orderId);
+  assert.equal((await deliverWebhook("payment.captured", wandaPayment, "evt_e2e_1", "wrong-secret")).status, 401);
+  assert.equal(await memberCount(), membersBefore + 1);
+  const delivered = await deliverWebhook("payment.captured", wandaPayment, "evt_e2e_1");
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
+  assert.equal(delivered.body.data.outcome, "recorded");
+  assert.equal((await deliverWebhook("payment.captured", wandaPayment, "evt_e2e_1")).body.data.outcome, "duplicate");
+  assert.equal((await deliverWebhook("order.paid", wandaPayment, "evt_e2e_2")).body.data.outcome, "already_recorded");
+  assert.equal(await memberCount(), membersBefore + 2);
+  assert.equal((await treasurer.get("/api/transactions?category=dues")).data.length, duesBefore + 2);
+  ok("a webhook is accepted only with a valid signature over the raw body, and repeats create nothing");
+
+  const wandaBack = await anon.post(`${onlineRoute}/${wanda.data.id}`, { action: "resume", token: wanda.data.accessToken });
+  assert.equal(wandaBack.data.status, "activated");
+  assert.match(wandaBack.data.setup.path, /^\/activate\//);
+  assert.equal((await anon.post("/api/public/applications/status", { code: wanda.data.code, email: "wanda@e2e.example" })).data.status, "approved");
+  ok("an applicant who returns after the webhook collects their password link");
+
+  // Paid, but neither the browser nor a webhook told the server. A reviewer checks with Razorpay.
+  const rhea = await anon.post(onlineRoute, { name: "Rhea Recovery", email: "rhea@e2e.example" });
+  fakeRazorpay.pay(rhea.data.checkout.orderId);
+  assert.equal((await anon.get("/api/online-applications")).status, 401);
+  assert.equal((await organizer.get("/api/online-applications")).status, 403);
+  assert.equal((await organizer.post(`/api/online-applications/${rhea.data.id}`, { action: "check" })).status, 403);
+  assert.equal(await memberCount(), membersBefore + 2);
+  const checked = await treasurer.post(`/api/online-applications/${rhea.data.id}`, { action: "check" });
+  assert.equal(checked.status, 200, JSON.stringify(checked.error));
+  assert.equal(checked.data.payment.status, "activated");
+  assert.match(checked.data.setup.path, /^\/activate\//);
+  assert.equal(await memberCount(), membersBefore + 3);
+  assert.equal((await treasurer.get("/api/online-applications")).data.length, 3);
+  assert.equal(fakeRazorpay.unauthenticated, 0);
+  ok("a reviewer can recover a paid application from Razorpay; other roles cannot see online payments");
 
   // --- cross-site requests ---------------------------------------------------------
   const crossSite = new Client({ Origin: "https://evil.example" });
@@ -311,12 +812,14 @@ async function main(): Promise<void> {
   ok("sessions survive a restart (stored in the database)");
 
   await stopServer();
+  fakeRazorpay.stop();
   fs.rmSync(dir, { recursive: true, force: true });
   console.log(`\nAll ${passed} checks passed.`);
 }
 
 main().catch(async (error) => {
   await stopServer();
+  fakeRazorpay.stop();
   console.error("\nEnd-to-end check FAILED\n");
   console.error(error);
   process.exit(1);

@@ -107,7 +107,11 @@ export default function PublicEventPage() {
                 </dt>
                 <dd className="flex-1">
                   <span className="text-ink">
-                    <span className="num font-semibold">{event.remaining}</span> of {event.capacity} seats left
+                    <span className="num font-semibold">{event.remaining}</span> seats left
+                    <span className="text-muted">
+                      {" "}
+                      · {event.capacity - event.remaining} of {event.capacity} taken
+                    </span>
                   </span>
                   <div className="mt-1.5 max-w-xs">
                     <Meter value={event.capacity - event.remaining} max={event.capacity} label="Seats taken" tone={event.remaining === 0 ? "bad" : "brand"} />

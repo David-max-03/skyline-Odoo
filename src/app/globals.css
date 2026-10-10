@@ -85,7 +85,7 @@
   /* ---- 3. Component --------------------------------------------------- */
   --corner-control: 0.5rem;
   --corner-card: 0.75rem;
-  --elevation-card: 0 1px 2px rgb(11 18 32 / 0.05);
+  --elevation-card: 0 1px 2px rgb(11 18 32 / 0.04), 0 1px 1px rgb(11 18 32 / 0.03);
   --elevation-raised: 0 12px 32px -8px rgb(11 18 32 / 0.22), 0 2px 6px rgb(11 18 32 / 0.08);
   --sidebar-width: 15.5rem;
 }
@@ -180,6 +180,142 @@
     width: 100%;
     height: auto;
   }
+}
+
+/*
+ * Focus ring on dark surfaces: the brand blue is too close to navy to see,
+ * so anything focused inside a night panel gets a light ring instead.
+ */
+.bg-night :focus-visible,
+.bg-night:focus-visible {
+  outline-color: var(--on-night);
+}
+
+/*
+ * Stacked tables. Below 640px a <Table stack> stops scrolling sideways:
+ * each row becomes a card and each cell shows its column name beside it.
+ * Unlayered on purpose so it wins over the cell padding utilities.
+ */
+@media (max-width: 639px) {
+  .stack-table {
+    display: block;
+    min-width: 0;
+  }
+  .stack-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .stack-table tbody,
+  .stack-table tfoot {
+    display: block;
+  }
+  .stack-table tr {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    padding: 0.875rem 1.25rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .stack-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+  .stack-table td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0;
+    border: 0;
+    text-align: right;
+  }
+  .stack-table td[data-label]::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    text-align: left;
+    color: var(--muted);
+  }
+  /* The row's title cell and any cell that needs the full width. */
+  .stack-table td[data-layout="lead"],
+  .stack-table td[data-layout="block"] {
+    display: block;
+    text-align: left;
+  }
+  .stack-table td[data-layout="block"][data-label]::before {
+    display: block;
+    margin-bottom: 0.25rem;
+  }
+  .stack-table td[data-layout="actions"] {
+    justify-content: flex-start;
+    padding-top: 0.375rem;
+  }
+  .stack-table td[data-layout="actions"] > div {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .stack-table td:empty,
+  /* An actions cell with nothing to press would leave a gap at the foot of the card. */
+  .stack-table td[data-layout="actions"]:not(:has(button, a)) {
+    display: none;
+  }
+}
+
+/* Scrollable strips (filter rows) keep scrolling but hide the bar. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Room for the phone tab bar, including the home-indicator inset. */
+.pb-tabbar {
+  padding-bottom: calc(4.25rem + env(safe-area-inset-bottom));
+}
+@media (min-width: 1024px) {
+  .pb-tabbar {
+    padding-bottom: 2rem;
+  }
+}
+.h-tabbar {
+  height: calc(3.75rem + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+.skeleton {
+  border-radius: var(--corner-control);
+  background: linear-gradient(90deg, var(--line) 25%, var(--sunken) 37%, var(--line) 63%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.01);
+  }
+  100% {
+    transform: none;
+  }
+}
+.animate-pop {
+  animation: pop 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 @keyframes rise {

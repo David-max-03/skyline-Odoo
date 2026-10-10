@@ -7,41 +7,47 @@ import { Suspense, useEffect, useState, type FormEvent } from "react";
 import { Logo } from "@/components/public-shell";
 import { Button, Card, FormError, Skeleton, TextField } from "@/components/ui";
 import { api, errorMessage, fieldErrors, useApi } from "@/lib/api-client";
-import { ROLE_LABELS, type Role, type SessionUser } from "@/lib/contracts";
+import { ROLE_LABELS, type AccountRole, type SessionUser } from "@/lib/contracts";
 
 interface Me {
   user: SessionUser | null;
-  demo: { accounts: { email: string; name: string; role: Role }[]; password: string } | null;
+  demo: { accounts: { email: string; name: string; role: AccountRole }[]; password: string } | null;
 }
 
 /** Only same-site paths are accepted, so the sign-in link cannot bounce people elsewhere. */
-function safeNext(value: string | null): string {
-  return value && value.startsWith("/") && !value.startsWith("//") ? value : "/org";
+function safeNext(value: string | null): string | null {
+  return value && value.startsWith("/") && !value.startsWith("//") ? value : null;
+}
+
+/** Members land in the member area and staff in the committee area, whatever `next` says. */
+function destination(user: SessionUser, next: string | null): string {
+  const home = user.role === "member" ? "/member" : "/org";
+  return next && (next === home || next.startsWith(`${home}/`)) ? next : home;
 }
 
 function LoginForm() {
   const router = useRouter();
   const next = safeNext(useSearchParams().get("next"));
   const me = useApi<Me>("/api/auth/me");
-  const [email, setEmail] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
 
-  const signedIn = Boolean(me.data?.user);
+  const signedInAs = me.data?.user ?? null;
   useEffect(() => {
-    if (signedIn) router.replace(next);
-  }, [signedIn, router, next]);
+    if (signedInAs) router.replace(destination(signedInAs, next));
+  }, [signedInAs, router, next]);
 
   async function signIn(credentials: { email: string; password: string }) {
     setWorking(true);
     setFormError(null);
     setErrors({});
     try {
-      await api("/api/auth/login", { method: "POST", body: credentials });
+      const { user } = await api<{ user: SessionUser }>("/api/auth/login", { method: "POST", body: credentials });
       // A full navigation, so the proxy and layout see the new cookie.
-      window.location.assign(next);
+      window.location.assign(destination(user, next));
     } catch (error) {
       setErrors(fieldErrors(error));
       setFormError(errorMessage(error));
@@ -54,8 +60,10 @@ function LoginForm() {
       <Link href="/" className="mb-8 inline-block rounded-control" aria-label="Skyline home">
         <Logo />
       </Link>
-      <h1 className="text-2xl font-bold">Committee sign-in</h1>
-      <p className="mt-1 text-sm text-muted">For the people who run the club. Students do not need an account to register for events.</p>
+      <h1 className="text-2xl font-bold">Sign in</h1>
+      <p className="mt-1 text-sm text-muted">
+        Members sign in with their member ID or email. The committee signs in with their email.
+      </p>
 
       <Card className="mt-6 p-5">
         <form
@@ -63,16 +71,33 @@ function LoginForm() {
           noValidate
           onSubmit={(e: FormEvent) => {
             e.preventDefault();
-            void signIn({ email, password });
+            void signIn({ email: identifier, password });
           }}
         >
           <FormError message={formError} />
-          <TextField label="Email" type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} error={errors.email} required />
+          <TextField
+            label="Email or member ID"
+            autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
+            placeholder="you@example.com or SKY-M-0001"
+            value={identifier}
+            onChange={(e) => setIdentifier(e.target.value)}
+            error={errors.email}
+            required
+          />
           <TextField label="Password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} error={errors.password} required />
           <Button type="submit" size="lg" className="w-full" loading={working}>
             Sign in
           </Button>
         </form>
+        <p className="mt-4 text-[0.8125rem] text-muted">
+          Not a member yet?{" "}
+          <Link href="/join" className="font-medium text-brand hover:underline">
+            Apply to join
+          </Link>
+          . Forgotten your password, or never set one? Ask the treasurer for a new setup link.
+        </p>
       </Card>
 
       {me.data?.demo && (

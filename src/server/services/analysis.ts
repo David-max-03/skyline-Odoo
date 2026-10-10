@@ -6,12 +6,10 @@ import type {
 } from "@/lib/contracts";
 import { AppError } from "../errors";
 import { getEvent } from "./events";
-import { getFinanceTotals } from "./finance";
 
 /**
- * Deterministic financial analysis. The event page and the assistant both call
- * these functions, so a number shown in a card and a number quoted in an
- * answer are the same calculation. No language model does any arithmetic.
+ * Deterministic financial analysis for the event page: break-even and the
+ * gap to a profit target, computed from the event's ledger rows.
  */
 
 /** Smallest whole number of tickets at `priceCents` that covers `amountCents`. */
@@ -78,7 +76,7 @@ export function profitTargetForEvent(event: EventSummary, targetCents?: number |
   if (target === null || target === undefined) {
     throw new AppError(
       "no_target",
-      `${event.title} has no profit target. Set one on the event, or include an amount in the question.`,
+      `${event.title} has no profit target. Set one on the event.`,
       422,
     );
   }
@@ -94,21 +92,5 @@ export function profitTargetForEvent(event: EventSummary, targetCents?: number |
     gapProjectedCents,
     ticketsToCloseGap: event.priceCents > 0 ? ticketsFor(gapProjectedCents, event.priceCents) : null,
     seatsRemaining: event.stats.remaining,
-  };
-}
-
-export function profitTargetForOrganisation(targetCents: number): ProfitTargetAnalysis {
-  const totals = getFinanceTotals();
-  return {
-    scope: "organisation",
-    eventId: null,
-    title: "The whole organisation",
-    targetCents,
-    actualNetCents: totals.netCents,
-    projectedNetCents: totals.projectedNetCents,
-    gapActualCents: Math.max(0, targetCents - totals.netCents),
-    gapProjectedCents: Math.max(0, targetCents - totals.projectedNetCents),
-    ticketsToCloseGap: null,
-    seatsRemaining: null,
   };
 }

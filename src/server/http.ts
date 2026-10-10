@@ -18,10 +18,13 @@ import { AppError, forbidden, unauthorized } from "./errors";
 interface BaseContext<B> {
   req: NextRequest;
   body: B;
+  /** The submitted form, for routes declared with `form`. Files are read from here. */
+  form: FormData | null;
   params: Record<string, string>;
   query: URLSearchParams;
 }
 export type StaffContext<B> = BaseContext<B> & { user: SessionUser };
+export type MemberContext<B> = BaseContext<B> & { user: SessionUser; memberId: string };
 export type PublicContext<B> = BaseContext<B> & { user: SessionUser | null };
 
 interface RateLimit {
@@ -33,6 +36,12 @@ interface RateLimit {
 
 interface Options<S extends z.ZodType | undefined> {
   body?: S;
+  /**
+   * Accept a multipart form instead of JSON. The text fields are validated
+   * with `body`; files are read from `ctx.form`. Requests larger than
+   * `maxBytes` are refused before the body is read.
+   */
+  form?: { maxBytes: number };
   limit?: RateLimit;
 }
 
@@ -53,12 +62,34 @@ export function staffRoute<S extends z.ZodType | undefined = undefined>(
     (ctx) => handler(ctx as StaffContext<BodyOf<S>>),
     (user) => {
       if (!user) throw unauthorized();
-      if (roles && !roles.includes(user.role)) throw forbidden();
+      // Member accounts are never staff, including on routes open to every staff role.
+      if (user.role === "member") throw forbidden("This area is for committee accounts.");
+      if (roles && !(roles as readonly string[]).includes(user.role)) throw forbidden();
     },
   );
 }
 
-/** Route anyone may call. `ctx.user` is set when a staff session is present. */
+/**
+ * Route for a signed-in member acting on their own records. `ctx.memberId`
+ * comes from the session; handlers must use it rather than any id in the request.
+ */
+export function memberRoute<S extends z.ZodType | undefined = undefined>(
+  options: Options<S>,
+  handler: (ctx: MemberContext<BodyOf<S>>) => unknown,
+): RouteHandler {
+  return build(
+    options,
+    (ctx) => handler({ ...ctx, memberId: ctx.user!.memberId! } as MemberContext<BodyOf<S>>),
+    (user) => {
+      if (!user) throw unauthorized();
+      if (user.role !== "member" || !user.memberId) {
+        throw forbidden("Sign in with a member account to use this.");
+      }
+    },
+  );
+}
+
+/** Route anyone may call. `ctx.user` is set when a staff or member session is present. */
 export function publicRoute<S extends z.ZodType | undefined = undefined>(
   options: Options<S>,
   handler: (ctx: PublicContext<BodyOf<S>>) => unknown,
@@ -81,12 +112,18 @@ function build<S extends z.ZodType | undefined>(
       authorise?.(user);
 
       let body: unknown = undefined;
+      let form: FormData | null = null;
+      if (options.form) form = await readForm(req, options.form.maxBytes);
       if (options.body) {
         let raw: unknown;
-        try {
-          raw = await req.json();
-        } catch {
-          throw new AppError("invalid_json", "The request body must be valid JSON.", 400);
+        if (form) {
+          raw = Object.fromEntries([...form.entries()].filter(([, value]) => typeof value === "string"));
+        } else {
+          try {
+            raw = await req.json();
+          } catch {
+            throw new AppError("invalid_json", "The request body must be valid JSON.", 400);
+          }
         }
         const parsed = options.body.safeParse(raw);
         if (!parsed.success) {
@@ -110,6 +147,7 @@ function build<S extends z.ZodType | undefined>(
         req,
         user,
         body: body as BodyOf<S>,
+        form,
         params,
         query: req.nextUrl.searchParams,
       });
@@ -129,6 +167,28 @@ function build<S extends z.ZodType | undefined>(
       );
     }
   };
+}
+
+/**
+ * Reads a multipart form. The declared length is checked first, so an
+ * oversized upload is refused without buffering it.
+ */
+async function readForm(req: NextRequest, maxBytes: number): Promise<FormData> {
+  if (!(req.headers.get("content-type") ?? "").toLowerCase().startsWith("multipart/form-data")) {
+    throw new AppError("invalid_form", "Send this request as a form.", 415);
+  }
+  const length = Number(req.headers.get("content-length") ?? Number.NaN);
+  if (!Number.isFinite(length)) {
+    throw new AppError("length_required", "The request must state its size.", 411);
+  }
+  if (length > maxBytes) {
+    throw new AppError("too_large", "That upload is too large.", 413);
+  }
+  try {
+    return await req.formData();
+  } catch {
+    throw new AppError("invalid_form", "The form could not be read.", 400);
+  }
 }
 
 function json(body: unknown, status: number): Response {
@@ -186,6 +246,11 @@ function enforceLimit(req: NextRequest, limit: RateLimit): void {
 export const LIMITS = {
   login: { name: "login", max: 10, windowMs: 60_000 },
   publicWrite: { name: "public-write", max: 30, windowMs: 60_000 },
+  /** Uploads from people without an account: few are ever legitimate from one address. */
+  application: { name: "application", max: 6, windowMs: 10 * 60_000 },
+  passwordSetup: { name: "password-setup", max: 10, windowMs: 60_000 },
+  /** Starting an online application creates an order with the payment provider. */
+  onlineStart: { name: "online-start", max: 10, windowMs: 10 * 60_000 },
+  onlineAction: { name: "online-action", max: 60, windowMs: 60_000 },
   ticketLookup: { name: "ticket-lookup", max: 60, windowMs: 60_000 },
-  assistant: { name: "assistant", max: 30, windowMs: 60_000 },
 } as const satisfies Record<string, RateLimit>;

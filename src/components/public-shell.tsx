@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { SETTINGS } from "@/lib/contracts";
+import { CartLink } from "./shop-ui";
 import { cn } from "./ui";
 
 /** The Skyline mark: a row of rooftops with the sun coming up behind them. */
@@ -38,10 +39,11 @@ export function Logo({
 }
 
 const LINKS = [
+  { href: "/", label: "Home" },
   { href: "/events", label: "Events" },
-  { href: "/shop", label: "Shop" },
-  { href: "/news", label: "News" },
-  { href: "/join", label: "Join" },
+  { href: "/shop", label: "Merchandise" },
+  { href: "/join", label: "Become a member" },
+  { href: "/login", label: "Login" },
 ];
 
 /** Header and footer for the pages students and visitors see. */
@@ -54,16 +56,16 @@ export function PublicShell({ children }: { children: ReactNode }) {
           <Link href="/" aria-label="Skyline home" className="rounded-control">
             <Logo compact />
           </Link>
-          <nav aria-label="Main" className="flex items-center gap-0.5 sm:gap-1">
+          <nav aria-label="Main" className="no-scrollbar flex min-w-0 items-center gap-0.5 overflow-x-auto sm:gap-1">
             {LINKS.map((link) => {
-              const active = pathname === link.href || pathname.startsWith(`${link.href}/`);
+              const active = link.href === "/" ? pathname === "/" : pathname === link.href || pathname.startsWith(`${link.href}/`);
               return (
                 <Link
                   key={link.href}
                   href={link.href}
                   aria-current={active ? "page" : undefined}
                   className={cn(
-                    "rounded-control px-2.5 py-2 text-sm font-medium transition-colors sm:px-3",
+                    "shrink-0 whitespace-nowrap rounded-control px-2.5 py-2 text-sm font-medium transition-colors sm:px-3",
                     active ? "bg-brand-soft text-brand-deep" : "text-muted hover:bg-sunken hover:text-ink",
                   )}
                 >
@@ -72,6 +74,7 @@ export function PublicShell({ children }: { children: ReactNode }) {
               );
             })}
           </nav>
+          <CartLink />
         </div>
       </header>
       <main id="main" className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
@@ -80,9 +83,14 @@ export function PublicShell({ children }: { children: ReactNode }) {
       <footer className="no-print border-t border-line bg-surface">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-5 text-[0.8125rem] text-muted sm:px-6">
           <p>{SETTINGS.orgName}</p>
-          <Link href="/login" className="font-medium text-brand hover:underline">
-            Committee sign-in
-          </Link>
+          <p className="flex gap-4">
+            <Link href="/news" className="font-medium text-brand hover:underline">
+              News
+            </Link>
+            <Link href="/login" className="font-medium text-brand hover:underline">
+              Sign in
+            </Link>
+          </p>
         </div>
       </footer>
     </div>
