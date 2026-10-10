@@ -46,14 +46,14 @@ export function phaseOf(row: Pick<EventRow, "starts_at" | "ends_at">, at: Date =
   return "past";
 }
 
-function ticketCounts(): Map<string, TicketCounts> {
-  const rows = all<TicketCounts & { event_id: string }>(
+async function ticketCounts(): Promise<Map<string, TicketCounts>> {
+  const rows = await all<TicketCounts & { event_id: string }>(
     `SELECT event_id,
             COUNT(*) AS registered,
-            SUM(payment_status = 'paid') AS paid,
-            SUM(payment_status = 'pending') AS pending,
-            SUM(payment_status = 'free') AS free,
-            SUM(checked_in_at IS NOT NULL) AS checked_in
+            SUM(CASE WHEN payment_status = 'paid' THEN 1 ELSE 0 END) AS paid,
+            SUM(CASE WHEN payment_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN payment_status = 'free' THEN 1 ELSE 0 END) AS free,
+            SUM(CASE WHEN checked_in_at IS NOT NULL THEN 1 ELSE 0 END) AS checked_in
      FROM tickets WHERE status = 'valid' GROUP BY event_id`,
   );
   return new Map(rows.map((r) => [r.event_id, r]));
@@ -93,29 +93,29 @@ function toSummary(row: EventRow, counts: TicketCounts, finance: EventFinance): 
   };
 }
 
-export function listEvents(): EventSummary[] {
-  const counts = ticketCounts();
-  const finance = eventFinanceMap();
-  return all<EventRow>("SELECT * FROM events ORDER BY starts_at DESC").map((row) =>
+export async function listEvents(): Promise<EventSummary[]> {
+  const counts = await ticketCounts();
+  const finance = await eventFinanceMap();
+  return (await all<EventRow>("SELECT * FROM events ORDER BY starts_at DESC")).map((row) =>
     toSummary(row, counts.get(row.id) ?? NO_TICKETS, finance.get(row.id) ?? emptyEventFinance()),
   );
 }
 
-export function getEvent(id: string): EventSummary {
-  const row = get<EventRow>("SELECT * FROM events WHERE id = ?", id);
+export async function getEvent(id: string): Promise<EventSummary> {
+  const row = await get<EventRow>("SELECT * FROM events WHERE id = ?", id);
   if (!row) throw notFound("Event");
   return toSummary(
     row,
-    ticketCounts().get(id) ?? NO_TICKETS,
-    eventFinanceMap().get(id) ?? emptyEventFinance(),
+    (await ticketCounts()).get(id) ?? NO_TICKETS,
+    (await eventFinanceMap()).get(id) ?? emptyEventFinance(),
   );
 }
 
-export function createEvent(input: EventInput, actor: SessionUser | null): EventSummary {
+export async function createEvent(input: EventInput, actor: SessionUser | null): Promise<EventSummary> {
   const user = requireRole(actor, "admin", "organizer");
   const id = newId("evt");
   const ts = nowIso();
-  run(
+  await run(
     `INSERT INTO events
        (id, title, description, venue, starts_at, ends_at, capacity, price_cents, member_price_cents,
         profit_target_cents, status, created_by, created_at, updated_at)
@@ -137,16 +137,16 @@ export function createEvent(input: EventInput, actor: SessionUser | null): Event
   return getEvent(id);
 }
 
-export function updateEvent(id: string, input: EventInput, actor: SessionUser | null): EventSummary {
+export async function updateEvent(id: string, input: EventInput, actor: SessionUser | null): Promise<EventSummary> {
   requireRole(actor, "admin", "organizer");
-  return tx(() => {
-    const row = get<EventRow>("SELECT * FROM events WHERE id = ?", id);
+  return tx(async () => {
+    const row = await get<EventRow>("SELECT * FROM events WHERE id = ?", id);
     if (!row) throw notFound("Event");
     if (row.status === "cancelled") {
       throw conflict("event_cancelled", "A cancelled event cannot be edited.");
     }
     const registered =
-      get<{ n: number }>("SELECT COUNT(*) AS n FROM tickets WHERE event_id = ? AND status = 'valid'", id)
+      (await get<{ n: number }>("SELECT COUNT(*) AS n FROM tickets WHERE event_id = ? AND status = 'valid'", id))
         ?.n ?? 0;
     // Never let an edit put the event over capacity after the fact.
     if (input.capacity < registered) {
@@ -154,7 +154,7 @@ export function updateEvent(id: string, input: EventInput, actor: SessionUser | 
         capacity: `${registered} people are already registered`,
       });
     }
-    run(
+    await run(
       `UPDATE events SET title = ?, description = ?, venue = ?, starts_at = ?, ends_at = ?, capacity = ?,
          price_cents = ?, member_price_cents = ?, profit_target_cents = ?, updated_at = ?
        WHERE id = ?`,
@@ -180,27 +180,27 @@ export function updateEvent(id: string, input: EventInput, actor: SessionUser | 
  * voided and a pending refund is recorded for every ticket already paid, so
  * the treasurer can see exactly who is owed money.
  */
-export function setEventStatus(
+export async function setEventStatus(
   id: string,
   status: EventStatus,
   actor: SessionUser | null,
-): EventStatusChange {
+): Promise<EventStatusChange> {
   const user = requireRole(actor, "admin", "organizer");
-  return tx(() => {
-    const row = get<EventRow>("SELECT * FROM events WHERE id = ?", id);
+  return tx(async () => {
+    const row = await get<EventRow>("SELECT * FROM events WHERE id = ?", id);
     if (!row) throw notFound("Event");
     let voidedPendingCount = 0;
     let refundsDueCents = 0;
 
     if (row.status === status) {
-      return { event: getEvent(id), voidedPendingCount, refundsDueCents };
+      return { event: await getEvent(id), voidedPendingCount, refundsDueCents };
     }
     if (row.status === "cancelled") {
       throw conflict("event_cancelled", "A cancelled event cannot be reopened. Create a new event.");
     }
     if (status === "draft") {
       const registered =
-        get<{ n: number }>("SELECT COUNT(*) AS n FROM tickets WHERE event_id = ? AND status = 'valid'", id)
+        (await get<{ n: number }>("SELECT COUNT(*) AS n FROM tickets WHERE event_id = ? AND status = 'valid'", id))
           ?.n ?? 0;
       if (registered > 0) {
         throw conflict(
@@ -211,20 +211,20 @@ export function setEventStatus(
     }
     if (status === "cancelled") {
       const reason = "Event cancelled";
-      voidedPendingCount = run(
+      voidedPendingCount = (await run(
         `UPDATE transactions SET voided_at = ?, void_reason = ?
          WHERE event_id = ? AND source = 'ticket' AND status = 'pending' AND voided_at IS NULL`,
         nowIso(),
         reason,
         id,
-      ).changes;
-      const paid = all<{ id: string; code: string; attendee_name: string; price_cents: number; member_id: string | null }>(
+      )).changes;
+      const paid = await all<{ id: string; code: string; attendee_name: string; price_cents: number; member_id: string | null }>(
         `SELECT id, code, attendee_name, price_cents, member_id FROM tickets
          WHERE event_id = ? AND status = 'valid' AND payment_status = 'paid' AND price_cents > 0`,
         id,
       );
       for (const t of paid) {
-        recordTransaction({
+        await recordTransaction({
           type: "expense",
           category: "refund",
           amountCents: t.price_cents,
@@ -242,10 +242,10 @@ export function setEventStatus(
       // The tickets themselves are dead too. Marking them cancelled keeps every
       // ticket in step with its ledger row: no valid ticket is left pointing at
       // a voided charge.
-      run("UPDATE tickets SET status = 'cancelled' WHERE event_id = ? AND status = 'valid'", id);
+      await run("UPDATE tickets SET status = 'cancelled' WHERE event_id = ? AND status = 'valid'", id);
     }
-    run("UPDATE events SET status = ?, updated_at = ? WHERE id = ?", status, nowIso(), id);
-    return { event: getEvent(id), voidedPendingCount, refundsDueCents };
+    await run("UPDATE events SET status = ?, updated_at = ? WHERE id = ?", status, nowIso(), id);
+    return { event: await getEvent(id), voidedPendingCount, refundsDueCents };
   });
 }
 
@@ -274,16 +274,16 @@ function toPublic(row: EventRow, registered: number): PublicEvent {
   };
 }
 
-export function listPublicEvents(): PublicEvent[] {
-  const counts = ticketCounts();
-  return all<EventRow>(
+export async function listPublicEvents(): Promise<PublicEvent[]> {
+  const counts = await ticketCounts();
+  return (await all<EventRow>(
     "SELECT * FROM events WHERE status = 'published' AND ends_at > ? ORDER BY starts_at ASC",
     nowIso(),
-  ).map((row) => toPublic(row, counts.get(row.id)?.registered ?? 0));
+  )).map((row) => toPublic(row, counts.get(row.id)?.registered ?? 0));
 }
 
-export function getPublicEvent(id: string): PublicEvent {
-  const row = get<EventRow>("SELECT * FROM events WHERE id = ? AND status = 'published'", id);
+export async function getPublicEvent(id: string): Promise<PublicEvent> {
+  const row = await get<EventRow>("SELECT * FROM events WHERE id = ? AND status = 'published'", id);
   if (!row) throw notFound("Event");
-  return toPublic(row, ticketCounts().get(id)?.registered ?? 0);
+  return toPublic(row, (await ticketCounts()).get(id)?.registered ?? 0);
 }

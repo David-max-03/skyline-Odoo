@@ -79,34 +79,38 @@ const toMemberSession = (row: Omit<MemberAccountRow, "password_hash">): SessionU
   memberNo: row.member_no,
 });
 
-export function createUser(input: {
+export async function createUser(input: {
   email: string;
   name: string;
   role: Role;
   password: string;
-}): SessionUser {
+}): Promise<SessionUser> {
   const email = input.email.trim().toLowerCase();
   if (input.password.length < 8) {
     throw new AppError("weak_password", "Password must be at least 8 characters.", 422);
   }
-  if (get("SELECT 1 FROM users WHERE email = ?", email)) {
-    throw conflict("email_taken", "An account with this email already exists.");
-  }
   const id = newId("usr");
-  run(
-    "INSERT INTO users (id, email, name, role, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    id,
-    email,
-    input.name.trim(),
-    input.role,
-    hashPassword(input.password),
-    nowIso(),
-  );
+  const passwordHash = hashPassword(input.password);
+  // Check and insert together, so two requests for the same email cannot both pass the check.
+  await tx(async () => {
+    if (await get("SELECT 1 FROM users WHERE email = ?", email)) {
+      throw conflict("email_taken", "An account with this email already exists.");
+    }
+    await run(
+      "INSERT INTO users (id, email, name, role, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      id,
+      email,
+      input.name.trim(),
+      input.role,
+      passwordHash,
+      nowIso(),
+    );
+  });
   return { id, email, name: input.name.trim(), role: input.role, memberId: null, memberNo: null };
 }
 
-export function countUsers(): number {
-  return get<{ n: number }>("SELECT COUNT(*) AS n FROM users")?.n ?? 0;
+export async function countUsers(): Promise<number> {
+  return (await get<{ n: number }>("SELECT COUNT(*) AS n FROM users"))?.n ?? 0;
 }
 
 export interface LoginResult {
@@ -122,14 +126,14 @@ const MEMBER_NO = /^SKY-M-\d{1,9}$/i;
  * ID). Both password checks always run, so the response time does not reveal
  * which kind of account exists, and the error is the same for every failure.
  */
-export function login(identifier: string, password: string): LoginResult {
+export async function login(identifier: string, password: string): Promise<LoginResult> {
   const id = identifier.trim();
   const byMemberNo = MEMBER_NO.test(id);
 
   const staff = byMemberNo
     ? undefined
-    : get<UserRow>("SELECT * FROM users WHERE email = ?", id.toLowerCase());
-  const member = get<MemberAccountRow>(
+    : await get<UserRow>("SELECT * FROM users WHERE email = ?", id.toLowerCase());
+  const member = await get<MemberAccountRow>(
     `SELECT m.id, m.member_no, m.name, m.email, a.password_hash
      FROM member_accounts a JOIN members m ON m.id = a.member_id
      WHERE ${byMemberNo ? "m.member_no = ?" : "m.email = ?"}`,
@@ -144,14 +148,14 @@ export function login(identifier: string, password: string): LoginResult {
 
   const expiresAt = new Date(now().getTime() + SESSION_DAYS * 86_400_000);
   const ts = nowIso();
-  run("DELETE FROM sessions WHERE expires_at < ?", ts);
-  run("DELETE FROM member_sessions WHERE expires_at < ?", ts);
+  await run("DELETE FROM sessions WHERE expires_at < ?", ts);
+  await run("DELETE FROM member_sessions WHERE expires_at < ?", ts);
 
   // An email that is both a staff login and a member login signs in as staff
   // when the staff password matches.
   if (staffOk && staff) {
     const token = randomBytes(32).toString("base64url");
-    run(
+    await run(
       "INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
       hashToken(token),
       staff.id,
@@ -162,7 +166,7 @@ export function login(identifier: string, password: string): LoginResult {
   }
 
   const token = MEMBER_TOKEN_PREFIX + randomBytes(32).toString("base64url");
-  run(
+  await run(
     "INSERT INTO member_sessions (token_hash, member_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
     hashToken(token),
     member!.id,
@@ -172,11 +176,11 @@ export function login(identifier: string, password: string): LoginResult {
   return { user: toMemberSession(member!), token, expiresAt };
 }
 
-export function getSessionUser(token: string | null | undefined): SessionUser | null {
+export async function getSessionUser(token: string | null | undefined): Promise<SessionUser | null> {
   if (!token) return null;
   if (token.startsWith(MEMBER_TOKEN_PREFIX)) {
     // The join on member_accounts means removing an account ends its sessions' access too.
-    const row = get<Omit<MemberAccountRow, "password_hash">>(
+    const row = await get<Omit<MemberAccountRow, "password_hash">>(
       `SELECT m.id, m.member_no, m.name, m.email
        FROM member_sessions s
        JOIN members m ON m.id = s.member_id
@@ -187,7 +191,7 @@ export function getSessionUser(token: string | null | undefined): SessionUser | 
     );
     return row ? toMemberSession(row) : null;
   }
-  const row = get<UserRow>(
+  const row = await get<UserRow>(
     `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND s.expires_at > ?`,
     hashToken(token),
@@ -196,10 +200,10 @@ export function getSessionUser(token: string | null | undefined): SessionUser | 
   return row ? toSessionUser(row) : null;
 }
 
-export function logout(token: string | null | undefined): void {
+export async function logout(token: string | null | undefined): Promise<void> {
   if (!token) return;
   const table = token.startsWith(MEMBER_TOKEN_PREFIX) ? "member_sessions" : "sessions";
-  run(`DELETE FROM ${table} WHERE token_hash = ?`, hashToken(token));
+  await run(`DELETE FROM ${table} WHERE token_hash = ?`, hashToken(token));
 }
 
 /** Refuses a password that is too short or is one of the member's own identifiers. */
@@ -218,14 +222,14 @@ function assertMemberPassword(password: string, member: { email: string; member_
  * given, and every other session for the member is ended; the session making
  * the change (`currentToken`) stays signed in.
  */
-export function changeMemberPassword(
+export async function changeMemberPassword(
   memberId: string,
   currentPassword: string,
   newPassword: string,
   currentToken: string | null | undefined,
-): void {
-  tx(() => {
-    const member = get<MemberAccountRow>(
+): Promise<void> {
+  await tx(async () => {
+    const member = await get<MemberAccountRow>(
       `SELECT m.id, m.member_no, m.name, m.email, a.password_hash
        FROM member_accounts a JOIN members m ON m.id = a.member_id WHERE m.id = ?`,
       memberId,
@@ -238,13 +242,13 @@ export function changeMemberPassword(
     if (verifyPassword(newPassword, member.password_hash)) {
       throw invalid("Choose a different password.", { newPassword: "This is the same as your current password" });
     }
-    run(
+    await run(
       "UPDATE member_accounts SET password_hash = ?, password_set_at = ? WHERE member_id = ?",
       hashPassword(newPassword),
       nowIso(),
       memberId,
     );
-    run(
+    await run(
       "DELETE FROM member_sessions WHERE member_id = ? AND token_hash <> ?",
       memberId,
       currentToken ? hashToken(currentToken) : "",
@@ -263,16 +267,16 @@ export function changeMemberPassword(
 const badLink = () =>
   new AppError("invalid_link", "This link is not valid. It may have expired or already been used.", 400);
 
-export function createSetupToken(
+export async function createSetupToken(
   memberId: string,
   createdBy: string | null,
-): { token: string; expiresAt: string } {
-  return tx(() => {
-    if (!get("SELECT 1 FROM members WHERE id = ?", memberId)) throw notFound("Member");
-    run("DELETE FROM account_setup_tokens WHERE member_id = ? AND used_at IS NULL", memberId);
+): Promise<{ token: string; expiresAt: string }> {
+  return tx(async () => {
+    if (!await get("SELECT 1 FROM members WHERE id = ?", memberId)) throw notFound("Member");
+    await run("DELETE FROM account_setup_tokens WHERE member_id = ? AND used_at IS NULL", memberId);
     const token = randomBytes(32).toString("base64url");
     const expiresAt = new Date(now().getTime() + SETUP_LINK_HOURS * 3_600_000).toISOString();
-    run(
+    await run(
       `INSERT INTO account_setup_tokens (token_hash, member_id, expires_at, used_at, created_by, created_at)
        VALUES (?, ?, ?, NULL, ?, ?)`,
       hashToken(token),
@@ -286,8 +290,8 @@ export function createSetupToken(
 }
 
 /** Tells the holder of a link whose account it sets up. Changes nothing. */
-export function inspectSetupToken(token: string): SetupTokenInfo {
-  const row = get<{ member_no: string; name: string; expires_at: string }>(
+export async function inspectSetupToken(token: string): Promise<SetupTokenInfo> {
+  const row = await get<{ member_no: string; name: string; expires_at: string }>(
     `SELECT m.member_no, m.name, t.expires_at
      FROM account_setup_tokens t JOIN members m ON m.id = t.member_id
      WHERE t.token_hash = ? AND t.used_at IS NULL AND t.expires_at > ?`,
@@ -303,11 +307,11 @@ export function inspectSetupToken(token: string): SetupTokenInfo {
  * the guard: of two requests with the same link, only one can change a row.
  * Existing sessions for the member are ended, so a reset signs old devices out.
  */
-export function completeSetup(token: string, password: string): { memberNo: string } {
-  return tx(() => {
+export async function completeSetup(token: string, password: string): Promise<{ memberNo: string }> {
+  return tx(async () => {
     const tokenHash = hashToken(token);
     const ts = nowIso();
-    const spent = run(
+    const spent = await run(
       "UPDATE account_setup_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?",
       ts,
       tokenHash,
@@ -315,7 +319,7 @@ export function completeSetup(token: string, password: string): { memberNo: stri
     );
     if (spent.changes !== 1) throw badLink();
 
-    const member = get<{ id: string; member_no: string; email: string }>(
+    const member = await get<{ id: string; member_no: string; email: string }>(
       `SELECT m.id, m.member_no, m.email
        FROM account_setup_tokens t JOIN members m ON m.id = t.member_id
        WHERE t.token_hash = ?`,
@@ -326,7 +330,7 @@ export function completeSetup(token: string, password: string): { memberNo: stri
     // A failed check throws, which rolls the transaction back and leaves the link usable.
     assertMemberPassword(password, member, "password");
 
-    run(
+    await run(
       `INSERT INTO member_accounts (member_id, password_hash, password_set_at, created_at)
        VALUES (?, ?, ?, ?)
        ON CONFLICT(member_id) DO UPDATE SET
@@ -337,7 +341,7 @@ export function completeSetup(token: string, password: string): { memberNo: stri
       ts,
       ts,
     );
-    run("DELETE FROM member_sessions WHERE member_id = ?", member.id);
+    await run("DELETE FROM member_sessions WHERE member_id = ?", member.id);
     return { memberNo: member.member_no };
   });
 }

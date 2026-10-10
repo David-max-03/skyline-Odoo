@@ -3,7 +3,8 @@
  *
  *   npm run build && npm run e2e
  *
- * Starts `next start` on a temporary database, drives the real API the way
+ * Starts `next start` on a temporary database (a SQLite file, or with
+ * `npm run e2e:pg` a disposable PostgreSQL server), drives the real API the way
  * the UI does, restarts the server to prove the data persisted, and exits
  * non-zero on the first failed assertion. Nothing here touches data/skyline.db.
  */
@@ -22,6 +23,8 @@ const PORT = Number(process.env.E2E_PORT ?? 3217);
 const BASE = `http://127.0.0.1:${PORT}`;
 const ROOT = path.resolve(__dirname, "..");
 const PASSWORD = "e2e-password-1";
+/** Set by `scripts/with-postgres.ts`: run against its disposable PostgreSQL instead of a temporary SQLite file. */
+const ON_POSTGRES = process.env.SKYLINE_TEST_DB === "postgres";
 
 // A stand-in for Razorpay's API on this machine. The keys are made up; the
 // server under test is pointed here, so no request ever reaches Razorpay.
@@ -177,7 +180,10 @@ async function startServer(dbPath: string): Promise<void> {
     env: {
       ...process.env,
       NODE_ENV: "production",
-      SKYLINE_DB_PATH: dbPath,
+      // A production build only uses SQLite when told to; under `npm run e2e:pg` the
+      // disposable PostgreSQL server's DATABASE_URL is already in the environment.
+      ...(ON_POSTGRES ? {} : { SKYLINE_DB_DRIVER: "sqlite", SKYLINE_DB_PATH: dbPath }),
+      SKYLINE_UPLOAD_DIR: path.join(path.dirname(dbPath), "uploads"),
       SKYLINE_DISABLE_RATE_LIMIT: "1",
       // Set here so nothing in a local .env file can point this run at the real Razorpay.
       SKYLINE_RAZORPAY_MODE: "test",
@@ -227,20 +233,34 @@ async function main(): Promise<void> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "skyline-e2e-"));
   const dbPath = path.join(dir, "e2e.db");
 
-  // Accounts are created directly, as an administrator would with the seed script.
-  process.env.SKYLINE_DB_PATH = dbPath;
-  createUser({ email: "admin@e2e.example", name: "Asha Admin", role: "admin", password: PASSWORD });
-  createUser({ email: "treasurer@e2e.example", name: "Tariq Treasurer", role: "treasurer", password: PASSWORD });
-  createUser({ email: "organizer@e2e.example", name: "Omar Organizer", role: "organizer", password: PASSWORD });
-  closeDb();
+  if (ON_POSTGRES) {
+    // Only ever the throwaway server started by scripts/with-postgres.ts.
+    if (!/@127\.0\.0\.1:\d+\/skyline_test$/.test(process.env.DATABASE_URL ?? "")) {
+      throw new Error("Refusing to run: DATABASE_URL is not the disposable local test database.");
+    }
+  } else {
+    process.env.SKYLINE_DB_PATH = dbPath;
+  }
+  // Accounts are created directly, as an administrator would with the admin command.
+  await createUser({ email: "admin@e2e.example", name: "Asha Admin", role: "admin", password: PASSWORD });
+  await createUser({ email: "treasurer@e2e.example", name: "Tariq Treasurer", role: "treasurer", password: PASSWORD });
+  await createUser({ email: "organizer@e2e.example", name: "Omar Organizer", role: "organizer", password: PASSWORD });
+  await closeDb();
 
-  console.log(`Skyline end-to-end check\n  database: ${dbPath}\n  server:   ${BASE}\n`);
+  console.log(`Skyline end-to-end check\n  database: ${ON_POSTGRES ? "disposable PostgreSQL (127.0.0.1)" : dbPath}\n  server:   ${BASE}\n`);
   await fakeRazorpay.start();
   await startServer(dbPath);
 
   const anon = new Client();
   const organizer = await new Client().signIn("organizer@e2e.example");
   const treasurer = await new Client().signIn("treasurer@e2e.example");
+
+  // --- the database behind the server ------------------------------------------
+  const health = await anon.get("/api/health");
+  assert.equal(health.status, 200, JSON.stringify(health.error));
+  assert.equal(health.data.database, ON_POSTGRES ? "postgres" : "sqlite");
+  assert.deepEqual(Object.keys(health.data).sort(), ["database", "status"]);
+  ok(`the health check reports a working ${health.data.database} database and nothing else`);
 
   // --- access control ---------------------------------------------------------
   console.log("Access control");

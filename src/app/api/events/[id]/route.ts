@@ -5,11 +5,11 @@ import { getEvent, updateEvent } from "@/server/services/events";
 import { listEventTickets } from "@/server/services/tickets";
 
 /** One event with its registrations and the deterministic financial analysis. */
-export const GET = staffRoute(null, {}, ({ params }) => {
-  const event = getEvent(params.id);
+export const GET = staffRoute(null, {}, async ({ params }) => {
+  const event = await getEvent(params.id);
   return {
     event,
-    tickets: listEventTickets(event.id),
+    tickets: await listEventTickets(event.id),
     breakEven: breakEvenFor(event),
     profitTarget: event.profitTargetCents === null ? null : profitTargetForEvent(event),
   };

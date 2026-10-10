@@ -1,0 +1,23 @@
+# Netlify build settings for Skyline.
+#
+# The site is a Next.js app; Netlify's Next.js runtime turns its routes into
+# functions. Those functions have no durable local disk, so production keeps
+# everything in PostgreSQL: set DATABASE_URL (and the other variables listed in
+# DEVELOPMENT_SETUP.md) in the Netlify dashboard, never in this file.
+#
+# The database schema is NOT changed by a build or a deploy. Run
+# `npm run db:migrate` yourself before deploying a build that needs a newer schema.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  # Node 22 is an LTS line supported by Netlify Functions and by every dependency here.
+  NODE_VERSION = "22"
+
+# A webhook or API reply must never be cached by a CDN.
+[[headers]]
+  for = "/api/*"
+  [headers.values]
+    Cache-Control = "no-store"

@@ -26,6 +26,15 @@ is the map.
 
 Roles: **A** admin, **T** treasurer, **O** organizer. "Staff" means any of the three.
 
+## Service status
+
+`GET /api/health` answers `200 { "data": { "status": "ok", "database": "postgres" | "sqlite" } }` when the
+database is reachable and at the schema version this build needs.
+
+Any route answers `503 { "error": { "code": "database_unavailable", … } }` when the database is not
+configured, not reachable or not migrated. The cause is in the server log only. Nothing is marked paid
+and no local file is used as a fallback.
+
 ## Auth
 
 | Method and path | Access | Body | Returns |

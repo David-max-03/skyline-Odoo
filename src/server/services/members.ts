@@ -38,7 +38,7 @@ interface MemberRow {
 
 const SELECT = `
   SELECT m.*,
-    EXISTS (SELECT 1 FROM member_accounts a WHERE a.member_id = m.id) AS has_account,
+    CASE WHEN EXISTS (SELECT 1 FROM member_accounts a WHERE a.member_id = m.id) THEN 1 ELSE 0 END AS has_account,
     (SELECT MAX(p.ends_on) FROM membership_periods p
       WHERE p.member_id = m.id AND p.paid_at IS NOT NULL) AS paid_until,
     (SELECT COALESCE(SUM(p.amount_cents), 0) FROM membership_periods p
@@ -72,20 +72,20 @@ function toMember(r: MemberRow, on: string = today()): Member {
 
 const yearEnd = (ymd: string) => `${ymd.slice(0, 4)}-12-31`;
 
-export function listMembers(): Member[] {
+export async function listMembers(): Promise<Member[]> {
   const on = today();
-  return all<MemberRow>(`${SELECT} ORDER BY m.name COLLATE NOCASE`).map((r) => toMember(r, on));
+  return (await all<MemberRow>(`${SELECT} ORDER BY lower(m.name), m.id`)).map((r) => toMember(r, on));
 }
 
-function getMemberRow(id: string): MemberRow {
-  const row = get<MemberRow>(`${SELECT} WHERE m.id = ?`, id);
+async function getMemberRow(id: string): Promise<MemberRow> {
+  const row = await get<MemberRow>(`${SELECT} WHERE m.id = ?`, id);
   if (!row) throw notFound("Member");
   return row;
 }
 
-export function getMember(id: string): MemberDetail {
-  const member = toMember(getMemberRow(id));
-  const periods = all<{
+export async function getMember(id: string): Promise<MemberDetail> {
+  const member = toMember(await getMemberRow(id));
+  const periods = (await all<{
     id: string;
     kind: "new" | "renewal";
     starts_on: string;
@@ -93,7 +93,7 @@ export function getMember(id: string): MemberDetail {
     amount_cents: number;
     paid_at: string | null;
     created_at: string;
-  }>("SELECT * FROM membership_periods WHERE member_id = ? ORDER BY starts_on DESC", id).map(
+  }>("SELECT * FROM membership_periods WHERE member_id = ? ORDER BY starts_on DESC", id)).map(
     (p): MembershipPeriod => ({
       id: p.id,
       kind: p.kind,
@@ -104,7 +104,7 @@ export function getMember(id: string): MemberDetail {
       createdAt: p.created_at,
     }),
   );
-  const tickets = all<{
+  const tickets = (await all<{
     code: string;
     event_id: string;
     title: string;
@@ -120,7 +120,7 @@ export function getMember(id: string): MemberDetail {
      ORDER BY e.starts_at DESC`,
     id,
     member.email,
-  ).map((t) => ({
+  )).map((t) => ({
     code: t.code,
     eventId: t.event_id,
     eventTitle: t.title,
@@ -130,7 +130,7 @@ export function getMember(id: string): MemberDetail {
     status: t.status,
     checkedInAt: t.checked_in_at,
   }));
-  const orders = all<{
+  const orders = (await all<{
     code: string;
     name: string;
     size: string;
@@ -146,7 +146,7 @@ export function getMember(id: string): MemberDetail {
      ORDER BY o.created_at DESC`,
     id,
     member.email,
-  ).map((o) => ({
+  )).map((o) => ({
     code: o.code,
     productName: o.name,
     size: o.size,
@@ -159,8 +159,8 @@ export function getMember(id: string): MemberDetail {
   return { ...member, periods, tickets, orders };
 }
 
-function nextMemberNo(): string {
-  const row = get<{ n: number | null }>(
+async function nextMemberNo(): Promise<string> {
+  const row = await get<{ n: number | null }>(
     "SELECT MAX(CAST(substr(member_no, 7) AS INTEGER)) AS n FROM members",
   );
   return `SKY-M-${String((row?.n ?? 0) + 1).padStart(4, "0")}`;
@@ -182,11 +182,11 @@ interface NewTerm {
 }
 
 /** Adds a term and its dues entry in the ledger. Call inside a transaction. */
-function addTerm(t: NewTerm): void {
+async function addTerm(t: NewTerm): Promise<void> {
   const periodId = newId("per");
   const ts = nowIso();
   const amountCents = t.amountCents ?? SETTINGS.membershipFeeCents;
-  run(
+  await run(
     `INSERT INTO membership_periods (id, member_id, kind, starts_on, ends_on, amount_cents, paid_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     periodId,
@@ -198,7 +198,7 @@ function addTerm(t: NewTerm): void {
     t.paid ? ts : null,
     ts,
   );
-  recordTransaction({
+  await recordTransaction({
     type: "income",
     category: "dues",
     amountCents,
@@ -215,7 +215,7 @@ function addTerm(t: NewTerm): void {
   });
 }
 
-function insertMember(
+async function insertMember(
   input: { name: string; email: string; studentId: string | null; phone: string | null },
   term: {
     paid: boolean;
@@ -225,9 +225,9 @@ function insertMember(
     note?: string;
     amountCents?: number;
   },
-): string {
+): Promise<string> {
   const on = today();
-  if (get("SELECT 1 FROM members WHERE email = ?", input.email)) {
+  if (await get("SELECT 1 FROM members WHERE email = ?", input.email)) {
     throw conflict("email_taken", "This email is already on the member list.");
   }
   const endsOn = term.endsOn ?? yearEnd(on);
@@ -235,11 +235,11 @@ function insertMember(
     throw invalid("The expiry date is in the past.", { expiresOn: "Choose today or a later date" });
   }
   const id = newId("mem");
-  run(
+  await run(
     `INSERT INTO members (id, member_no, name, email, student_id, phone, joined_on, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     id,
-    nextMemberNo(),
+    await nextMemberNo(),
     input.name,
     input.email,
     input.studentId,
@@ -247,7 +247,7 @@ function insertMember(
     on,
     nowIso(),
   );
-  addTerm({
+  await addTerm({
     memberId: id,
     memberName: input.name,
     kind: "new",
@@ -263,16 +263,16 @@ function insertMember(
 }
 
 /** Staff adds a member, optionally recording dues as collected. */
-export function createMember(input: MemberInput, actor: SessionUser | null): Member {
+export async function createMember(input: MemberInput, actor: SessionUser | null): Promise<Member> {
   const user = requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    const id = insertMember(input, {
+  return tx(async () => {
+    const id = await insertMember(input, {
       paid: input.duesPaid,
       method: input.method,
       endsOn: input.expiresOn,
       createdBy: user.id,
     });
-    return toMember(getMemberRow(id));
+    return toMember(await getMemberRow(id));
   });
 }
 
@@ -283,11 +283,11 @@ export function createMember(input: MemberInput, actor: SessionUser | null): Mem
  * and calls it inside its transaction, and the online flow calls it only after
  * verifying the payment with Razorpay, with no staff account (`createdBy` null).
  */
-export function admitMember(
+export async function admitMember(
   input: { name: string; email: string; studentId: string | null; phone: string | null },
   payment: { method: PaymentMethod; reference: string; createdBy: string | null; amountCents?: number; note?: string },
-): Member {
-  const id = insertMember(input, {
+): Promise<Member> {
+  const id = await insertMember(input, {
     paid: true,
     method: payment.method,
     endsOn: null,
@@ -295,13 +295,13 @@ export function admitMember(
     note: payment.note ?? `ref ${payment.reference}`,
     amountCents: payment.amountCents,
   });
-  return toMember(getMemberRow(id));
+  return toMember(await getMemberRow(id));
 }
 
 /** Builds a one-time password-setup link. Callers must have authorised first. */
-export function newSetupLink(memberId: string, createdBy: string | null): SetupLink {
-  const member = getMemberRow(memberId);
-  const { token, expiresAt } = createSetupToken(memberId, createdBy);
+export async function newSetupLink(memberId: string, createdBy: string | null): Promise<SetupLink> {
+  const member = await getMemberRow(memberId);
+  const { token, expiresAt } = await createSetupToken(memberId, createdBy);
   return {
     path: `/activate/${token}`,
     expiresAt,
@@ -315,23 +315,23 @@ export function newSetupLink(memberId: string, createdBy: string | null): SetupL
  * Staff issue a new setup link, for a member who never set a password or has
  * forgotten it. Any earlier unused link for the member stops working.
  */
-export function issueSetupLink(memberId: string, actor: SessionUser | null): SetupLink {
+export async function issueSetupLink(memberId: string, actor: SessionUser | null): Promise<SetupLink> {
   const user = requireRole(actor, "admin", "treasurer");
   return newSetupLink(memberId, user.id);
 }
 
-export function updateMember(
+export async function updateMember(
   id: string,
   input: { name: string; email: string; studentId: string | null; phone: string | null },
   actor: SessionUser | null,
-): Member {
+): Promise<Member> {
   requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    getMemberRow(id);
-    if (get("SELECT 1 FROM members WHERE email = ? AND id <> ?", input.email, id)) {
+  return tx(async () => {
+    await getMemberRow(id);
+    if (await get("SELECT 1 FROM members WHERE email = ? AND id <> ?", input.email, id)) {
       throw conflict("email_taken", "Another member already uses this email.");
     }
-    run(
+    await run(
       "UPDATE members SET name = ?, email = ?, student_id = ?, phone = ? WHERE id = ?",
       input.name,
       input.email,
@@ -339,7 +339,7 @@ export function updateMember(
       input.phone,
       id,
     );
-    return toMember(getMemberRow(id));
+    return toMember(await getMemberRow(id));
   });
 }
 
@@ -347,32 +347,32 @@ export function updateMember(
  * A member edits their own contact details. Only the phone number and student
  * ID can change this way; the id always comes from the session.
  */
-export function updateOwnProfile(
+export async function updateOwnProfile(
   memberId: string,
   input: { phone: string | null; studentId: string | null },
-): MemberDetail {
-  const changed = run("UPDATE members SET phone = ?, student_id = ? WHERE id = ?", input.phone, input.studentId, memberId);
+): Promise<MemberDetail> {
+  const changed = await run("UPDATE members SET phone = ?, student_id = ? WHERE id = ?", input.phone, input.studentId, memberId);
   if (changed.changes !== 1) throw notFound("Member");
   return getMember(memberId);
 }
 
 /** Collects every unpaid term for a member. */
-export function collectDues(id: string, method: PaymentMethod, actor: SessionUser | null): Member {
+export async function collectDues(id: string, method: PaymentMethod, actor: SessionUser | null): Promise<Member> {
   requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    getMemberRow(id);
-    const unpaid = all<{ id: string }>(
+  return tx(async () => {
+    await getMemberRow(id);
+    const unpaid = await all<{ id: string }>(
       "SELECT id FROM membership_periods WHERE member_id = ? AND paid_at IS NULL",
       id,
     );
     if (unpaid.length === 0) throw conflict("nothing_owed", "This member has no unpaid dues.");
     for (const period of unpaid) {
-      if (!settlePendingFor({ periodId: period.id }, method)) {
+      if (!await settlePendingFor({ periodId: period.id }, method)) {
         // No ledger row to settle (should not happen); keep the term consistent anyway.
-        run("UPDATE membership_periods SET paid_at = ? WHERE id = ?", nowIso(), period.id);
+        await run("UPDATE membership_periods SET paid_at = ? WHERE id = ?", nowIso(), period.id);
       }
     }
-    return toMember(getMemberRow(id));
+    return toMember(await getMemberRow(id));
   });
 }
 
@@ -380,16 +380,16 @@ export function collectDues(id: string, method: PaymentMethod, actor: SessionUse
  * Starts the next term. It begins the day after the current paid term ends,
  * or today if the membership has lapsed, and runs to 31 December of that year.
  */
-export function renewMember(id: string, input: RenewInput, actor: SessionUser | null): Member {
+export async function renewMember(id: string, input: RenewInput, actor: SessionUser | null): Promise<Member> {
   const user = requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    const row = getMemberRow(id);
+  return tx(async () => {
+    const row = await getMemberRow(id);
     if (row.dues_owed > 0) {
       throw conflict("dues_outstanding", "Collect this member's unpaid dues before adding another term.");
     }
     const on = today();
     const startsOn = row.paid_until && row.paid_until >= on ? addDays(row.paid_until, 1) : on;
-    addTerm({
+    await addTerm({
       memberId: id,
       memberName: row.name,
       kind: "renewal",
@@ -399,7 +399,7 @@ export function renewMember(id: string, input: RenewInput, actor: SessionUser | 
       method: input.method,
       createdBy: user.id,
     });
-    return toMember(getMemberRow(id));
+    return toMember(await getMemberRow(id));
   });
 }
 
@@ -408,8 +408,8 @@ export function renewMember(id: string, input: RenewInput, actor: SessionUser | 
  * a paid term must cover today, so nobody can claim a discount (or probe the
  * member list) with an email address alone.
  */
-export function findActiveMember(email: string, memberNo: string): { id: string; memberNo: string } | null {
-  const row = get<MemberRow>(
+export async function findActiveMember(email: string, memberNo: string): Promise<{ id: string; memberNo: string } | null> {
+  const row = await get<MemberRow>(
     `${SELECT} WHERE m.email = ? AND m.member_no = ?`,
     email.trim().toLowerCase(),
     memberNo.trim().toUpperCase(),
@@ -418,9 +418,9 @@ export function findActiveMember(email: string, memberNo: string): { id: string;
   return { id: row.id, memberNo: row.member_no };
 }
 
-export function memberCounts(): Record<MemberStatus, number> & { total: number } {
+export async function memberCounts(): Promise<Record<MemberStatus, number> & { total: number }> {
   const counts = { total: 0, active: 0, expiring: 0, lapsed: 0, unpaid: 0 };
-  for (const m of listMembers()) {
+  for (const m of await listMembers()) {
     counts.total += 1;
     counts[m.status] += 1;
   }

@@ -12,8 +12,8 @@ export const PATCH = staffRoute(
 export const POST = staffRoute(
   CAN.manageFinance,
   { body: transactionActionSchema },
-  ({ body, params, user }) =>
+  async ({ body, params, user }) =>
     body.action === "settle"
-      ? settleTransaction(params.id, body.method, user)
-      : voidTransaction(params.id, body.reason, user),
+      ? await settleTransaction(params.id, body.method, user)
+      : await voidTransaction(params.id, body.reason, user),
 );

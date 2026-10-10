@@ -1,6 +1,7 @@
 # Architecture
 
-Skyline is one Next.js application backed by one SQLite file. There are no other services.
+Skyline is one Next.js application backed by one database: PostgreSQL in production, a
+SQLite file for local development and tests. The same services and SQL run on both.
 
 ```
 Browser ── pages (client components) ── fetch ──► /api/* route handlers
@@ -8,7 +9,7 @@ Browser ── pages (client components) ── fetch ──► /api/* route han
                                                     ▼
                                              src/server/services/*   ← every business rule lives here
                                                     ▼
-                                             src/server/db.ts ──► data/skyline.db (SQLite, WAL)
+                                             src/server/db.ts ──► PostgreSQL (production) or data/skyline.db (local)
 ```
 
 Calls go in one direction only: UI → API → services → database. Services never import
@@ -19,7 +20,7 @@ from `src/app` or `src/components`, and UI code never imports from `src/server`.
 | Choice | Reason |
 |---|---|
 | Next.js 16 (App Router), React 19, TypeScript | One deployable for pages and API. `cacheComponents` is off: every screen shows live data. |
-| SQLite through Node's built-in `node:sqlite` | Real transactions for capacity, check-in and stock; no credentials; runs offline. Needs Node ≥ 22.5. |
+| PostgreSQL (`pg`) in production, SQLite (`node:sqlite`) locally | One asynchronous interface in `src/server/db.ts` with a driver for each (`src/server/db/`). Real transactions for capacity, check-in, stock and payments. Write transactions are serialised on both: SQLite's single writer, and one advisory lock per transaction on PostgreSQL. Local development needs no credentials and runs offline. |
 | zod | One schema per input, shared by server validation and TypeScript types. |
 | Tailwind CSS v4 | Styling from design tokens in `src/app/globals.css`. |
 | `qrcode`, `jsqr` | QR generated on the server as SVG; decoded in the browser from the camera. |
@@ -68,7 +69,7 @@ dates are `YYYY-MM-DD` in the organisation's timezone. The schema is in `src/ser
 | `razorpay_webhook_events` | Webhook deliveries that passed signature verification | Keyed by Razorpay's event ID, so a repeat delivery does nothing |
 | `expense_claims` | Reimbursement requests | Receipt photo required; one linked ledger row at most |
 | `checkouts`, `product_images` | Items bought together; product photos | `orders` rows are the lines of a checkout |
-| `files` | Uploaded evidence and product photos (bytes on disk under `<db folder>/uploads`) | JPEG, PNG or WebP by content, 5 MB cap, random id as the file name |
+| `files` | Uploaded evidence and product photos (bytes in `file_contents` on PostgreSQL; on disk under `<db folder>/uploads` for local SQLite) | JPEG, PNG or WebP by content, 5 MB cap, random id as the file name |
 | `events` | Draft → published → cancelled | `capacity > 0`, prices `>= 0` |
 | `tickets` | One row per registration | Unique `code`; unique `(event_id, email)` among valid tickets |
 | `transactions` | The ledger | `amount_cents > 0`; `status` settled or pending; `voided_at` |
@@ -159,6 +160,8 @@ paid, a pending `refund` expense is recorded so the books show what is owed back
 - One organisation per installation. No self-service password reset or account
   management UI: accounts are created by the seed script.
 - Public sign-up reveals whether an email is already a member ("already on the list").
-- Rate limits and the single SQLite connection assume one server process.
+- Rate limits are counted in the database (`rate_limits`), so they hold across server instances.
+- Upload bytes are in the database (`file_contents`) on PostgreSQL, and on disk for local SQLite.
+- The PostgreSQL schema is in `src/server/db/postgres-schema.ts` and is applied only by `npm run db:migrate`.
 - The interface is light-theme only. Tokens are structured so a dark theme can be added
   in `globals.css` without touching components.

@@ -2,7 +2,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import type { z } from "zod";
 import type { Role, SessionUser } from "@/lib/contracts";
 import { SESSION_COOKIE, getSessionUser } from "./auth";
+import { isDatabaseUnavailable } from "./db/types";
 import { AppError, forbidden, unauthorized } from "./errors";
+import { enforceRateLimit, type RateLimit } from "./rate-limit";
 
 /**
  * Route wrapper used by every handler in `src/app/api`.
@@ -26,13 +28,6 @@ interface BaseContext<B> {
 export type StaffContext<B> = BaseContext<B> & { user: SessionUser };
 export type MemberContext<B> = BaseContext<B> & { user: SessionUser; memberId: string };
 export type PublicContext<B> = BaseContext<B> & { user: SessionUser | null };
-
-interface RateLimit {
-  /** Bucket name; limits are per bucket per client address. */
-  name: string;
-  max: number;
-  windowMs: number;
-}
 
 interface Options<S extends z.ZodType | undefined> {
   body?: S;
@@ -106,9 +101,9 @@ function build<S extends z.ZodType | undefined>(
   return async (req, args) => {
     try {
       if (MUTATING.has(req.method)) assertSameOrigin(req);
-      if (options.limit) enforceLimit(req, options.limit);
+      if (options.limit) await enforceRateLimit(options.limit, clientAddress(req));
 
-      const user = getSessionUser(req.cookies.get(SESSION_COOKIE)?.value);
+      const user = await getSessionUser(req.cookies.get(SESSION_COOKIE)?.value);
       authorise?.(user);
 
       let body: unknown = undefined;
@@ -160,11 +155,7 @@ function build<S extends z.ZodType | undefined>(
           error.status,
         );
       }
-      console.error(`[api] ${req.method} ${req.nextUrl.pathname} failed`, error);
-      return json(
-        { error: { code: "internal", message: "Something went wrong on the server." } },
-        500,
-      );
+      return failure(req.method, req.nextUrl.pathname, error);
     }
   };
 }
@@ -189,6 +180,23 @@ async function readForm(req: NextRequest, maxBytes: number): Promise<FormData> {
   } catch {
     throw new AppError("invalid_form", "The form could not be read.", 400);
   }
+}
+
+/**
+ * The reply for an unexpected failure. A database that is not configured, not
+ * reachable or not migrated is a 503, with a reason in the server log that
+ * never includes a connection string. Nothing about the cause reaches the client.
+ */
+export function failure(method: string, pathname: string, error: unknown): Response {
+  if (isDatabaseUnavailable(error)) {
+    console.error(`[api] ${method} ${pathname}: database unavailable: ${error.reason}`);
+    return json(
+      { error: { code: "database_unavailable", message: "The service is temporarily unavailable. Try again shortly." } },
+      503,
+    );
+  }
+  console.error(`[api] ${method} ${pathname} failed`, error);
+  return json({ error: { code: "internal", message: "Something went wrong on the server." } }, 500);
 }
 
 function json(body: unknown, status: number): Response {
@@ -216,31 +224,10 @@ function assertSameOrigin(req: NextRequest): void {
 }
 
 // --- rate limiting -----------------------------------------------------------
-// In-memory fixed window. Enough to blunt brute force and form spam on a
-// single-process deployment; it resets when the server restarts.
+// Counted in the database (see rate-limit.ts), so a limit holds across server instances.
 
-const globalBuckets = globalThis as unknown as {
-  __skylineBuckets?: Map<string, { count: number; resetAt: number }>;
-};
-const buckets = (globalBuckets.__skylineBuckets ??= new Map());
-
-function enforceLimit(req: NextRequest, limit: RateLimit): void {
-  if (process.env.SKYLINE_DISABLE_RATE_LIMIT === "1") return;
-  const address = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local";
-  const key = `${limit.name}:${address}`;
-  const nowMs = Date.now();
-  const bucket = buckets.get(key);
-  if (!bucket || bucket.resetAt <= nowMs) {
-    buckets.set(key, { count: 1, resetAt: nowMs + limit.windowMs });
-    if (buckets.size > 5000) {
-      for (const [k, b] of buckets) if (b.resetAt <= nowMs) buckets.delete(k);
-    }
-    return;
-  }
-  bucket.count += 1;
-  if (bucket.count > limit.max) {
-    throw new AppError("rate_limited", "Too many attempts. Wait a minute and try again.", 429);
-  }
+function clientAddress(req: NextRequest): string | null {
+  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
 }
 
 export const LIMITS = {

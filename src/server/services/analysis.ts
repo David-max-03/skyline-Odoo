@@ -67,8 +67,8 @@ export function breakEvenFor(event: EventSummary): BreakEvenAnalysis {
   };
 }
 
-export function breakEven(eventId: string): BreakEvenAnalysis {
-  return breakEvenFor(getEvent(eventId));
+export async function breakEven(eventId: string): Promise<BreakEvenAnalysis> {
+  return breakEvenFor(await getEvent(eventId));
 }
 
 export function profitTargetForEvent(event: EventSummary, targetCents?: number | null): ProfitTargetAnalysis {

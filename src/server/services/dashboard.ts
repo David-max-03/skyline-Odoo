@@ -9,12 +9,12 @@ import { listTasks } from "./tasks";
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** Everything the dashboard shows, computed from stored records in one call. */
-export function getDashboard(): Dashboard {
-  const events = listEvents();
+export async function getDashboard(): Promise<Dashboard> {
+  const events = await listEvents();
   const live = events.filter((e) => e.status !== "cancelled");
-  const members = memberCounts();
-  const finance = getFinanceTotals();
-  const tasks = listTasks();
+  const members = await memberCounts();
+  const finance = await getFinanceTotals();
+  const tasks = await listTasks();
 
   const upcoming = live
     .filter((e) => e.status === "published" && e.phase !== "past")
@@ -52,10 +52,10 @@ export function getDashboard(): Dashboard {
     });
   }
 
-  const claims = get<{ n: number; total: number | null }>(
+  const claims = (await get<{ n: number; total: number | null }>(
     `SELECT COUNT(*) AS n, SUM(amount_cents) AS total FROM transactions
      WHERE voided_at IS NULL AND type = 'expense' AND status = 'pending' AND source = 'manual'`,
-  )!;
+  ))!;
   if (claims.n > 0) {
     alerts.push({
       kind: "pending_reimbursements",
@@ -66,10 +66,10 @@ export function getDashboard(): Dashboard {
     });
   }
 
-  const refunds = get<{ n: number; total: number | null }>(
+  const refunds = (await get<{ n: number; total: number | null }>(
     `SELECT COUNT(*) AS n, SUM(amount_cents) AS total FROM transactions
      WHERE voided_at IS NULL AND status = 'pending' AND source = 'refund'`,
-  )!;
+  ))!;
   if (refunds.n > 0) {
     alerts.push({
       kind: "refunds_due",
@@ -80,10 +80,10 @@ export function getDashboard(): Dashboard {
     });
   }
 
-  const unpaidTickets = get<{ n: number; total: number | null }>(
+  const unpaidTickets = (await get<{ n: number; total: number | null }>(
     `SELECT COUNT(*) AS n, SUM(t.price_cents) AS total FROM tickets t JOIN events e ON e.id = t.event_id
      WHERE t.status = 'valid' AND t.payment_status = 'pending' AND e.status = 'published'`,
-  )!;
+  ))!;
   if (unpaidTickets.n > 0) {
     alerts.push({
       kind: "unpaid_tickets",
@@ -104,7 +104,7 @@ export function getDashboard(): Dashboard {
     });
   }
 
-  const lowStock = all<{ name: string; size: string; stock: number }>(
+  const lowStock = await all<{ name: string; size: string; stock: number }>(
     `SELECT p.name, v.size, v.stock FROM product_variants v JOIN products p ON p.id = v.product_id
      WHERE p.active = 1 AND v.stock <= ? ORDER BY v.stock ASC, p.name ASC`,
     SETTINGS.lowStockThreshold,
@@ -179,7 +179,7 @@ export function getDashboard(): Dashboard {
         expenseSettledCents: e.finance.expenseSettledCents,
         netCents: e.finance.netCents,
       })),
-    cashflow: getMonthlyCashflow(),
+    cashflow: await getMonthlyCashflow(),
     alerts,
   };
 }

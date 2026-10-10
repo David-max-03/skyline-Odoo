@@ -5,8 +5,8 @@ import { readProductImage } from "@/server/services/merch";
  * A product photo. Public and cacheable, unlike evidence uploads: the service
  * only returns files that are recorded as product photos.
  */
-export const GET = publicRoute({}, ({ params }) => {
-  const file = readProductImage(params.id);
+export const GET = publicRoute({}, async ({ params }) => {
+  const file = await readProductImage(params.id);
   return new Response(new Uint8Array(file.bytes), {
     status: 200,
     headers: {

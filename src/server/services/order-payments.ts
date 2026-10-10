@@ -71,8 +71,8 @@ const SELECT = `
   JOIN members m ON m.id = p.member_id
   LEFT JOIN users u ON u.id = p.resolved_by`;
 
-function load(id: string): PaymentRow {
-  const row = get<PaymentRow>(`${SELECT} WHERE p.id = ?`, id);
+async function load(id: string): Promise<PaymentRow> {
+  const row = await get<PaymentRow>(`${SELECT} WHERE p.id = ?`, id);
   if (!row) throw notFound("Payment");
   return row;
 }
@@ -104,13 +104,13 @@ const ledgerMethod = (method: string | null): PaymentMethod =>
  * money for it is owed back, and the attempt is left for a reviewer.
  * Callers must have checked the payment against the attempt first.
  */
-function recordPayment(id: string, payment: GatewayPayment, via: Via): boolean {
-  return tx(() => {
-    const row = load(id);
+async function recordPayment(id: string, payment: GatewayPayment, via: Via): Promise<boolean> {
+  return tx(async () => {
+    const row = await load(id);
     if (row.razorpay_payment_id) {
       if (row.razorpay_payment_id !== payment.id) {
         // Razorpay allows one captured payment per order. If a second ever arrives, keep the evidence.
-        run(
+        await run(
           "UPDATE order_payments SET status = 'needs_review', review_reason = ?, updated_at = ? WHERE id = ? AND status = 'paid'",
           `A second payment (${payment.id}) was captured for this order. Refund it in Razorpay.`,
           nowIso(),
@@ -121,22 +121,22 @@ function recordPayment(id: string, payment: GatewayPayment, via: Via): boolean {
     }
 
     let applied = 0;
-    for (const line of linesOf(id)) {
-      const order = get<{ status: string; payment_status: string; total_cents: number }>(
+    for (const line of await linesOf(id)) {
+      const order = await get<{ status: string; payment_status: string; total_cents: number }>(
         "SELECT status, payment_status, total_cents FROM orders WHERE id = ?",
         line.order_id,
       );
       const stillOwed =
         order?.status !== "cancelled" && order?.payment_status === "pending" && order.total_cents === line.amount_cents;
       // The same call a committee member's "mark paid" makes: it settles the ledger entry and marks the line paid.
-      if (stillOwed && settlePendingFor({ orderId: line.order_id }, ledgerMethod(payment.method), `Razorpay ${payment.id}`)) {
+      if (stillOwed && await settlePendingFor({ orderId: line.order_id }, ledgerMethod(payment.method), `Razorpay ${payment.id}`)) {
         applied += line.amount_cents;
       }
     }
 
     const excess = row.amount_cents - applied;
     const ts = nowIso();
-    const updated = run(
+    const updated = await run(
       `UPDATE order_payments
        SET status = ?, razorpay_payment_id = ?, payment_method = ?, paid_at = ?, verified_via = ?,
            applied_cents = ?, review_reason = ?, failure_reason = NULL, updated_at = ?
@@ -158,17 +158,17 @@ function recordPayment(id: string, payment: GatewayPayment, via: Via): boolean {
   });
 }
 
-function markFailed(id: string, reason: string | null): boolean {
+async function markFailed(id: string, reason: string | null): Promise<boolean> {
   const ts = nowIso();
   return (
-    run(
+    (await run(
       `UPDATE order_payments SET status = 'failed', failure_reason = ?, failed_at = ?, updated_at = ?
        WHERE id = ? AND status IN ('pending','failed')`,
       (reason ?? "The payment did not go through.").slice(0, 200),
       ts,
       ts,
       id,
-    ).changes === 1
+    )).changes === 1
   );
 }
 
@@ -205,11 +205,11 @@ async function resolvePayment(row: PaymentRow, fetched: GatewayPayment, via: Via
     if (bad) throw reject(bad);
   }
   if (payment.status === "captured") {
-    recordPayment(row.id, payment, via);
+    await recordPayment(row.id, payment, via);
     return "settled";
   }
   if (payment.status === "failed" || payment.status === "refunded") {
-    markFailed(row.id, payment.status === "refunded" ? "The payment was refunded." : payment.errorDescription);
+    await markFailed(row.id, payment.status === "refunded" ? "The payment was refunded." : payment.errorDescription);
     return "failed";
   }
   return "processing";
@@ -220,7 +220,7 @@ async function syncWithProvider(row: PaymentRow): Promise<Resolution> {
   if (row.razorpay_payment_id) return "settled";
   const payments = await getGateway().listOrderPayments(row.razorpay_order_id);
   const paid = payments.find((p) => p.status === "captured") ?? payments.find((p) => p.status === "authorized");
-  return paid ? resolvePayment(row, paid, "lookup") : "none";
+  return paid ? await resolvePayment(row, paid, "lookup") : "none";
 }
 
 // --- the member's actions --------------------------------------------------------
@@ -239,9 +239,9 @@ function toCheckout(row: PaymentRow): OnlineCheckout | null {
   };
 }
 
-function stateOf(memberId: string, orderCode: string, processing = false): OrderPaymentState {
-  const { order } = memberOrder(memberId, orderCode);
-  const open = openAttempt(order.code);
+async function stateOf(memberId: string, orderCode: string, processing = false): Promise<OrderPaymentState> {
+  const { order } = await memberOrder(memberId, orderCode);
+  const open = await openAttempt(order.code);
   // An attempt is only worth offering while it still matches what is owed.
   const current = open && order.unpaidCents === open.amount_cents ? open : undefined;
   return {
@@ -253,8 +253,8 @@ function stateOf(memberId: string, orderCode: string, processing = false): Order
 }
 
 /** Whether an attempt covers exactly these lines at these amounts. Compared by id, so order does not matter. */
-const sameLines = (owed: { orderId: string; amountCents: number }[], paymentId: string) => {
-  const stored = new Map(linesOf(paymentId).map((line) => [line.order_id, line.amount_cents]));
+const sameLines = async (owed: { orderId: string; amountCents: number }[], paymentId: string) => {
+  const stored = new Map((await linesOf(paymentId)).map((line) => [line.order_id, line.amount_cents]));
   return stored.size === owed.length && owed.every((line) => stored.get(line.orderId) === line.amountCents);
 };
 
@@ -262,15 +262,15 @@ const sameLines = (owed: { orderId: string; amountCents: number }[], paymentId: 
 async function startPayment(memberId: string, orderCode: string): Promise<OrderPaymentState> {
   requireRazorpay();
   // Loads the order by the session's member; someone else's order is "not found".
-  let { order, owed } = memberOrder(memberId, orderCode);
+  let { order, owed } = await memberOrder(memberId, orderCode);
 
   // An earlier attempt may have been paid without this server hearing of it.
-  const earlier = openAttempt(order.code);
+  const earlier = await openAttempt(order.code);
   if (earlier) {
     const outcome = await syncWithProvider(earlier);
     if (outcome === "settled") return stateOf(memberId, order.code);
     if (outcome === "processing") return stateOf(memberId, order.code, true);
-    ({ order, owed } = memberOrder(memberId, orderCode));
+    ({ order, owed } = await memberOrder(memberId, orderCode));
   }
 
   const amountCents = owed.reduce((sum, line) => sum + line.amountCents, 0);
@@ -278,13 +278,13 @@ async function startPayment(memberId: string, orderCode: string): Promise<OrderP
   if (!payableOnline(amountCents)) {
     throw new AppError("not_payable_online", "This order cannot be paid online. Pay the committee when you collect it.", 409);
   }
-  if (get("SELECT 1 FROM order_payments WHERE order_code = ? AND status = 'needs_review'", order.code)) {
+  if (await get("SELECT 1 FROM order_payments WHERE order_code = ? AND status = 'needs_review'", order.code)) {
     throw conflict("payment_under_review", "An earlier payment for this order is being checked by the committee.");
   }
 
   // The same amount for the same lines: carry on with the order Razorpay already has.
-  const reusable = openAttempt(order.code);
-  if (reusable && reusable.amount_cents === amountCents && sameLines(owed, reusable.id)) {
+  const reusable = await openAttempt(order.code);
+  if (reusable && reusable.amount_cents === amountCents && await sameLines(owed, reusable.id)) {
     return stateOf(memberId, order.code);
   }
 
@@ -300,26 +300,26 @@ async function startPayment(memberId: string, orderCode: string): Promise<OrderP
     throw new AppError("payment_provider_unavailable", "The payment could not be started. Try again.", 502);
   }
 
-  tx(() => {
+  await tx(async () => {
     // What is owed may have changed while Razorpay was being asked.
-    const now = memberOrder(memberId, orderCode);
+    const now = await memberOrder(memberId, orderCode);
     const stillSame =
       now.owed.length === owed.length &&
       now.owed.every((line, i) => line.orderId === owed[i].orderId && line.amountCents === owed[i].amountCents);
     if (!stillSame) throw conflict("order_changed", "This order changed while the payment was starting. Try again.");
 
     // Two clicks at once: the first to get here wins and the other uses its attempt.
-    const winner = openAttempt(order.code);
-    if (winner && winner.amount_cents === amountCents && sameLines(owed, winner.id)) return;
+    const winner = await openAttempt(order.code);
+    if (winner && winner.amount_cents === amountCents && await sameLines(owed, winner.id)) return;
 
     const ts = nowIso();
-    run(
+    await run(
       "UPDATE order_payments SET status = 'superseded', updated_at = ? WHERE order_code = ? AND status IN ('pending','failed')",
       ts,
       order.code,
     );
     const id = newId("opy");
-    run(
+    await run(
       `INSERT INTO order_payments
          (id, member_id, order_code, amount_cents, currency, status, razorpay_order_id, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
@@ -333,7 +333,7 @@ async function startPayment(memberId: string, orderCode: string): Promise<OrderP
       ts,
     );
     for (const line of owed) {
-      run(
+      await run(
         "INSERT INTO order_payment_lines (payment_id, order_id, amount_cents) VALUES (?, ?, ?)",
         id,
         line.orderId,
@@ -356,13 +356,13 @@ export async function orderPaymentAction(
 ): Promise<OrderPaymentState> {
   if (action.action === "start") return startPayment(memberId, orderCode);
 
-  const { order } = memberOrder(memberId, orderCode);
+  const { order } = await memberOrder(memberId, orderCode);
   let processing = false;
 
   if (action.action === "confirm") {
     const config = requireRazorpay();
     // The attempt is found through this member's order, never from the id in the request alone.
-    const attempt = get<PaymentRow>(
+    const attempt = await get<PaymentRow>(
       `${SELECT} WHERE p.order_code = ? AND p.razorpay_order_id = ?`,
       order.code,
       action.razorpayOrderId,
@@ -379,7 +379,7 @@ export async function orderPaymentAction(
       processing = (await resolvePayment(attempt, payment, "checkout")) === "processing";
     }
   } else if (action.action === "check") {
-    const attempt = openAttempt(order.code);
+    const attempt = await openAttempt(order.code);
     if (attempt && checkRazorpayConfig().ok) {
       try {
         processing = (await syncWithProvider(attempt)) === "processing";
@@ -390,8 +390,8 @@ export async function orderPaymentAction(
     }
   } else {
     // Only a note for the member's own screen. A failure reported by the browser decides nothing.
-    const attempt = openAttempt(order.code);
-    if (attempt) markFailed(attempt.id, action.reason);
+    const attempt = await openAttempt(order.code);
+    if (attempt) await markFailed(attempt.id, action.reason);
   }
   return stateOf(memberId, order.code, processing);
 }
@@ -404,9 +404,9 @@ export async function orderPaymentAction(
  * the event is not for a membership). Returns null when the payment's order is
  * not a merchandise payment either.
  */
-export function handleOrderPaymentEvent(type: string, payment: GatewayPayment): string | null {
+export async function handleOrderPaymentEvent(type: string, payment: GatewayPayment): Promise<string | null> {
   const row = payment.orderId
-    ? get<PaymentRow>(`${SELECT} WHERE p.razorpay_order_id = ?`, payment.orderId)
+    ? await get<PaymentRow>(`${SELECT} WHERE p.razorpay_order_id = ?`, payment.orderId)
     : undefined;
   if (!row) return null;
 
@@ -417,10 +417,10 @@ export function handleOrderPaymentEvent(type: string, payment: GatewayPayment): 
       return `rejected_${bad}_mismatch`;
     }
     if (payment.status !== "captured") return "ignored_not_captured";
-    return recordPayment(row.id, payment, "webhook") ? "order_paid" : "already_recorded";
+    return await recordPayment(row.id, payment, "webhook") ? "order_paid" : "already_recorded";
   }
   if (type === "payment.failed") {
-    return markFailed(row.id, payment.errorDescription) ? "marked_failed" : "ignored_already_paid";
+    return await markFailed(row.id, payment.errorDescription) ? "marked_failed" : "ignored_already_paid";
   }
   return "ignored";
 }
@@ -446,19 +446,19 @@ const toRecord = (r: PaymentRow): OrderPaymentRecord => ({
 });
 
 /** Online merchandise payments that reached Razorpay's "paid", those needing a refund first. */
-export function listOrderPayments(actor: SessionUser | null): OrderPaymentRecord[] {
+export async function listOrderPayments(actor: SessionUser | null): Promise<OrderPaymentRecord[]> {
   requireRole(actor, "admin", "treasurer");
-  return all<PaymentRow>(
+  return (await all<PaymentRow>(
     `${SELECT} WHERE p.razorpay_payment_id IS NOT NULL
      ORDER BY (p.status <> 'needs_review'), p.paid_at DESC LIMIT 200`,
-  ).map(toRecord);
+  )).map(toRecord);
 }
 
 /** A reviewer records that the part of a payment that was not owed has been refunded in Razorpay. */
-export function resolveOrderPayment(id: string, note: string, actor: SessionUser | null): OrderPaymentRecord {
+export async function resolveOrderPayment(id: string, note: string, actor: SessionUser | null): Promise<OrderPaymentRecord> {
   const user = requireRole(actor, "admin", "treasurer");
   const ts = nowIso();
-  const updated = run(
+  const updated = await run(
     `UPDATE order_payments
      SET status = 'refunded', resolved_by = ?, resolved_at = ?, resolution_note = ?, updated_at = ?
      WHERE id = ? AND status = 'needs_review'`,
@@ -469,8 +469,8 @@ export function resolveOrderPayment(id: string, note: string, actor: SessionUser
     id,
   );
   if (updated.changes !== 1) {
-    load(id);
+    await load(id);
     throw conflict("not_in_review", "This payment is not waiting for review.");
   }
-  return toRecord(load(id));
+  return toRecord(await load(id));
 }

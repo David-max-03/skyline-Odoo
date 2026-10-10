@@ -1,4 +1,5 @@
 import { AppError } from "@/server/errors";
+import { failure } from "@/server/http";
 import { handleRazorpayWebhook } from "@/server/services/online-applications";
 
 /**
@@ -23,7 +24,7 @@ export async function POST(request: Request): Promise<Response> {
     const rawBody = Buffer.from(await request.arrayBuffer());
     if (rawBody.length > MAX_BYTES) throw new AppError("too_large", "The webhook body is too large.", 413);
 
-    const result = handleRazorpayWebhook(
+    const result = await handleRazorpayWebhook(
       rawBody,
       request.headers.get("x-razorpay-signature"),
       request.headers.get("x-razorpay-event-id"),
@@ -33,7 +34,8 @@ export async function POST(request: Request): Promise<Response> {
     if (error instanceof AppError) {
       return reply({ error: { code: error.code, message: error.message } }, error.status);
     }
-    console.error("[api] POST /api/webhooks/razorpay failed", error);
-    return reply({ error: { code: "internal", message: "Something went wrong on the server." } }, 500);
+    // Includes "database unavailable" (503): Razorpay retries anything that is not a 2xx,
+    // so a payment that could not be recorded now is delivered again later.
+    return failure("POST", "/api/webhooks/razorpay", error);
   }
 }

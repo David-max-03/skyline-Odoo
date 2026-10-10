@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { all, dbFile, get, newId, nowIso, run } from "./db";
+import { DatabaseUnavailableError, all, dbFile, dbKind, get, newId, nowIso, run, tx } from "./db";
+import { isServerless } from "./db/config";
 import { invalid, notFound } from "./errors";
 
 /**
@@ -62,12 +63,39 @@ export async function readUpload(form: FormData | null, field: string): Promise<
   return Buffer.from(await value.arrayBuffer());
 }
 
+type Backend = "database" | "disk";
+
+/**
+ * Where an upload's bytes are kept.
+ *
+ * - `database`: in the `file_contents` table, beside the `files` row that
+ *   describes it. This is the default on PostgreSQL and the only choice on a
+ *   serverless host, which has no disk that lasts or is shared. The bytes are
+ *   written in the caller's transaction, so a failed request leaves nothing behind.
+ * - `disk`: in the uploads folder. The default for local SQLite, so existing
+ *   local uploads keep working.
+ *
+ * `SKYLINE_UPLOADS=database|disk` overrides the default, except that `disk`
+ * is refused on a serverless host.
+ */
+async function backend(): Promise<Backend> {
+  const explicit = process.env.SKYLINE_UPLOADS?.trim();
+  if (explicit && explicit !== "database" && explicit !== "disk") {
+    throw new DatabaseUnavailableError("SKYLINE_UPLOADS must be `database` or `disk`");
+  }
+  const chosen: Backend = (explicit as Backend | undefined) ?? ((await dbKind()) === "postgres" ? "database" : "disk");
+  if (chosen === "disk" && isServerless()) {
+    throw new DatabaseUnavailableError("uploads cannot be kept on disk on a serverless host");
+  }
+  return chosen;
+}
+
 /**
  * Checks and stores an image, and returns its id. Call it inside the database
  * transaction that records what the image is evidence for; if that
  * transaction then fails, call `discardFile` with the id.
  */
-export function storeImage(bytes: Buffer, purpose: FilePurpose, field = "evidence"): string {
+export async function storeImage(bytes: Buffer, purpose: FilePurpose, field = "evidence"): Promise<string> {
   if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) {
     throw invalid("That image is too large.", { [field]: "The image must be 5 MB or smaller" });
   }
@@ -78,28 +106,47 @@ export function storeImage(bytes: Buffer, purpose: FilePurpose, field = "evidenc
     });
   }
   const id = newId("fil");
-  fs.mkdirSync(uploadDir(), { recursive: true, mode: 0o700 });
-  // "wx" refuses to overwrite, so an id collision cannot replace someone else's file.
-  fs.writeFileSync(pathFor(id), bytes, { flag: "wx", mode: 0o600 });
+  const where = await backend();
+  if (where === "disk") {
+    fs.mkdirSync(uploadDir(), { recursive: true, mode: 0o700 });
+    // "wx" refuses to overwrite, so an id collision cannot replace someone else's file.
+    fs.writeFileSync(pathFor(id), bytes, { flag: "wx", mode: 0o600 });
+  }
   try {
-    run(
-      "INSERT INTO files (id, purpose, mime, size, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      id,
-      purpose,
-      mime,
-      bytes.length,
-      createHash("sha256").update(bytes).digest("hex"),
-      nowIso(),
-    );
+    // The description and the bytes go in together or not at all.
+    await tx(async () => {
+      await run(
+        "INSERT INTO files (id, purpose, mime, size, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        id,
+        purpose,
+        mime,
+        bytes.length,
+        createHash("sha256").update(bytes).digest("hex"),
+        nowIso(),
+      );
+      if (where === "database") {
+        await run("INSERT INTO file_contents (file_id, bytes) VALUES (?, ?)", id, bytes);
+      }
+    });
   } catch (error) {
-    discardFile(id);
+    await discardFile(id);
     throw error;
   }
   return id;
 }
 
-/** Removes a stored file's bytes. Used when the record it belonged to was not saved. */
-export function discardFile(id: string): void {
+/**
+ * Removes a stored file's bytes. Used when the record it belonged to was not
+ * saved, or has just been deleted. Safe to call for bytes that are already gone.
+ */
+export async function discardFile(id: string): Promise<void> {
+  if (!FILE_ID.test(id)) return;
+  try {
+    await run("DELETE FROM file_contents WHERE file_id = ?", id);
+  } catch {
+    // the database is unreachable; there is nothing more to do here
+  }
+  if (isServerless()) return;
   try {
     fs.rmSync(pathFor(id), { force: true });
   } catch {
@@ -113,19 +160,34 @@ export interface StoredFile {
 }
 
 /** Reads a stored file. The caller must already have checked that the reader may see it. */
-export function openFile(id: string): StoredFile {
-  const row = get<{ mime: ImageMime }>("SELECT mime FROM files WHERE id = ?", id);
+export async function openFile(id: string): Promise<StoredFile> {
+  if (!FILE_ID.test(id)) throw notFound("File");
+  const row = await get<{ mime: ImageMime; bytes: Uint8Array | null }>(
+    `SELECT f.mime, c.bytes FROM files f LEFT JOIN file_contents c ON c.file_id = f.id WHERE f.id = ?`,
+    id,
+  );
   if (!row) throw notFound("File");
-  let bytes: Buffer;
+  if (row.bytes) return { mime: row.mime, bytes: Buffer.from(row.bytes) };
+  // Not in the database: a file kept on disk by local development.
+  if (isServerless()) throw notFound("File");
   try {
-    bytes = fs.readFileSync(pathFor(id));
+    return { mime: row.mime, bytes: fs.readFileSync(pathFor(id)) };
   } catch {
     throw notFound("File");
   }
-  return { mime: row.mime, bytes };
+}
+
+/** The ids of every file whose bytes are actually stored, wherever they are kept. For tests and import checks. */
+export async function storedFileIds(): Promise<string[]> {
+  const inDatabase = (await all<{ file_id: string }>("SELECT file_id FROM file_contents")).map((r) => r.file_id);
+  const onDisk =
+    (await backend()) === "disk" && fs.existsSync(uploadDir())
+      ? fs.readdirSync(uploadDir()).filter((name) => FILE_ID.test(name))
+      : [];
+  return [...new Set([...inDatabase, ...onDisk])].sort();
 }
 
 /** Deletes the bytes of every recorded file. The seed script calls this before wiping the tables. */
-export function removeAllUploads(): void {
-  for (const row of all<{ id: string }>("SELECT id FROM files")) discardFile(row.id);
+export async function removeAllUploads(): Promise<void> {
+  for (const row of await all<{ id: string }>("SELECT id FROM files")) await discardFile(row.id);
 }

@@ -6,8 +6,8 @@ import { readEvidence } from "@/server/services/applications";
  * route only sets headers that stop the browser caching it or treating it as
  * anything other than the image type recorded when it was stored.
  */
-export const GET = publicRoute({}, ({ params, user }) => {
-  const file = readEvidence(params.id, user);
+export const GET = publicRoute({}, async ({ params, user }) => {
+  const file = await readEvidence(params.id, user);
   return new Response(new Uint8Array(file.bytes), {
     status: 200,
     headers: {

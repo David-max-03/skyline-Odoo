@@ -6,8 +6,8 @@ import { registerMember } from "@/server/services/tickets";
  * and what they pay are decided on the server. A paid event's ticket comes
  * back `pending` until the committee records the payment.
  */
-export const POST = memberRoute({ limit: LIMITS.publicWrite }, ({ params, memberId }) => {
-  const ticket = registerMember(params.id, memberId);
+export const POST = memberRoute({ limit: LIMITS.publicWrite }, async ({ params, memberId }) => {
+  const ticket = await registerMember(params.id, memberId);
   return {
     code: ticket.code,
     priceCents: ticket.priceCents,

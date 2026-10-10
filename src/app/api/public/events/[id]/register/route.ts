@@ -8,8 +8,8 @@ import { registerForEvent } from "@/server/services/tickets";
  */
 export const POST = publicRoute(
   { body: registrationInputSchema, limit: LIMITS.publicWrite },
-  ({ body, params }) => {
-    const ticket = registerForEvent(params.id, body);
+  async ({ body, params }) => {
+    const ticket = await registerForEvent(params.id, body);
     return {
       code: ticket.code,
       priceCents: ticket.priceCents,

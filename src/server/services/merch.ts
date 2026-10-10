@@ -47,16 +47,16 @@ interface VariantRow {
 
 const imageUrl = (fileId: string) => `/api/public/product-images/${fileId}`;
 
-function loadProducts(where = "", ...params: string[]): Product[] {
-  const products = all<ProductRow>(`SELECT * FROM products ${where} ORDER BY created_at ASC`, ...params);
-  const variants = all<VariantRow>("SELECT * FROM product_variants ORDER BY position ASC");
-  const images = all<{ id: string; product_id: string; file_id: string }>(
+async function loadProducts(where = "", ...params: string[]): Promise<Product[]> {
+  const products = await all<ProductRow>(`SELECT * FROM products ${where} ORDER BY created_at ASC`, ...params);
+  const variants = await all<VariantRow>("SELECT * FROM product_variants ORDER BY position ASC");
+  const images = await all<{ id: string; product_id: string; file_id: string }>(
     "SELECT id, product_id, file_id FROM product_images ORDER BY position ASC, created_at ASC",
   );
   const sold = new Map(
-    all<{ product_id: string; units: number }>(
+    (await all<{ product_id: string; units: number }>(
       "SELECT product_id, SUM(quantity) AS units FROM orders WHERE status <> 'cancelled' GROUP BY product_id",
-    ).map((r) => [r.product_id, r.units]),
+    )).map((r) => [r.product_id, r.units]),
   );
   return products.map((p) => {
     const own = variants.filter((v) => v.product_id === p.id);
@@ -76,12 +76,12 @@ function loadProducts(where = "", ...params: string[]): Product[] {
   });
 }
 
-export function listProducts(): Product[] {
+export async function listProducts(): Promise<Product[]> {
   return loadProducts();
 }
 
-export function getProduct(id: string): Product {
-  const product = loadProducts("WHERE id = ?", id)[0];
+export async function getProduct(id: string): Promise<Product> {
+  const product = (await loadProducts("WHERE id = ?", id))[0];
   if (!product) throw notFound("Product");
   return product;
 }
@@ -97,22 +97,22 @@ const toPublicProduct = (p: Product): PublicProduct => ({
   variants: p.variants.map((v) => ({ id: v.id, size: v.size, inStock: v.stock > 0, stock: v.stock })),
 });
 
-export function listPublicProducts(): PublicProduct[] {
-  return loadProducts("WHERE active = 1").map(toPublicProduct);
+export async function listPublicProducts(): Promise<PublicProduct[]> {
+  return (await loadProducts("WHERE active = 1")).map(toPublicProduct);
 }
 
 /** One product for the shop. A deactivated product looks the same as a missing one. */
-export function getPublicProduct(id: string): PublicProduct {
-  const product = loadProducts("WHERE id = ? AND active = 1", id)[0];
+export async function getPublicProduct(id: string): Promise<PublicProduct> {
+  const product = (await loadProducts("WHERE id = ? AND active = 1", id))[0];
   if (!product) throw notFound("Product");
   return toPublicProduct(product);
 }
 
-export function createProduct(input: ProductInput, actor: SessionUser | null): Product {
+export async function createProduct(input: ProductInput, actor: SessionUser | null): Promise<Product> {
   requireRole(actor, "admin", "treasurer");
-  return tx(() => {
+  return tx(async () => {
     const id = newId("prd");
-    run(
+    await run(
       `INSERT INTO products (id, name, category, description, price_cents, member_price_cents, active, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
@@ -124,8 +124,8 @@ export function createProduct(input: ProductInput, actor: SessionUser | null): P
       input.active,
       nowIso(),
     );
-    input.variants.forEach((v, position) => {
-      run(
+    for (const [position, v] of input.variants.entries()) {
+      await run(
         "INSERT INTO product_variants (id, product_id, size, stock, position) VALUES (?, ?, ?, ?, ?)",
         newId("var"),
         id,
@@ -133,12 +133,12 @@ export function createProduct(input: ProductInput, actor: SessionUser | null): P
         v.stock,
         position,
       );
-    });
+    }
     return getProduct(id);
   });
 }
 
-export function updateProduct(
+export async function updateProduct(
   id: string,
   input: {
     name: string;
@@ -149,14 +149,14 @@ export function updateProduct(
     active: boolean;
   },
   actor: SessionUser | null,
-): Product {
+): Promise<Product> {
   requireRole(actor, "admin", "treasurer");
   if (input.memberPriceCents > input.priceCents) {
     throw invalid("Check the prices.", {
       memberPriceCents: "Member price cannot be higher than the standard price",
     });
   }
-  const result = run(
+  const result = await run(
     `UPDATE products SET name = ?, category = ?, description = ?, price_cents = ?, member_price_cents = ?, active = ?
      WHERE id = ?`,
     input.name,
@@ -172,14 +172,14 @@ export function updateProduct(
 }
 
 /** Sets the counted stock for one size, e.g. after a delivery or a stock-take. */
-export function setStock(
+export async function setStock(
   productId: string,
   variantId: string,
   stock: number,
   actor: SessionUser | null,
-): Product {
+): Promise<Product> {
   requireRole(actor, "admin", "treasurer");
-  const result = run(
+  const result = await run(
     "UPDATE product_variants SET stock = ? WHERE id = ? AND product_id = ?",
     stock,
     variantId,
@@ -190,19 +190,19 @@ export function setStock(
 }
 
 /** Adds a size to a product that already exists. */
-export function addVariant(
+export async function addVariant(
   productId: string,
   input: { size: string; stock: number },
   actor: SessionUser | null,
-): Product {
+): Promise<Product> {
   requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    const product = getProduct(productId);
+  return tx(async () => {
+    const product = await getProduct(productId);
     if (product.variants.some((v) => v.size.toLowerCase() === input.size.toLowerCase())) {
       throw invalid("This size already exists.", { size: "Each size must be unique" });
     }
     if (product.variants.length >= 12) throw invalid("Too many sizes.", { size: "A product can have at most 12 sizes" });
-    run(
+    await run(
       "INSERT INTO product_variants (id, product_id, size, stock, position) VALUES (?, ?, ?, ?, ?)",
       newId("var"),
       productId,
@@ -216,18 +216,18 @@ export function addVariant(
 
 // --- product photos ------------------------------------------------------------
 
-export function addProductImage(productId: string, bytes: Buffer | null, actor: SessionUser | null): Product {
+export async function addProductImage(productId: string, bytes: Buffer | null, actor: SessionUser | null): Promise<Product> {
   requireRole(actor, "admin", "treasurer");
   if (!bytes) throw invalid("Choose a photo.", { image: "Choose a photo to upload" });
   let fileId = null as string | null;
   try {
-    return tx(() => {
-      const product = getProduct(productId);
+    return tx(async () => {
+      const product = await getProduct(productId);
       if (product.images.length >= MAX_PRODUCT_IMAGES) {
         throw invalid("Too many photos.", { image: `A product can have at most ${MAX_PRODUCT_IMAGES} photos` });
       }
-      fileId = storeImage(bytes, "product_image", "image");
-      run(
+      fileId = await storeImage(bytes, "product_image", "image");
+      await run(
         "INSERT INTO product_images (id, product_id, file_id, position, created_at) VALUES (?, ?, ?, ?, ?)",
         newId("img"),
         productId,
@@ -238,25 +238,25 @@ export function addProductImage(productId: string, bytes: Buffer | null, actor: 
       return getProduct(productId);
     });
   } catch (error) {
-    if (fileId) discardFile(fileId);
+    if (fileId) await discardFile(fileId);
     throw error;
   }
 }
 
-export function removeProductImage(productId: string, imageId: string, actor: SessionUser | null): Product {
+export async function removeProductImage(productId: string, imageId: string, actor: SessionUser | null): Promise<Product> {
   requireRole(actor, "admin", "treasurer");
-  const fileId = tx(() => {
-    const row = get<{ file_id: string }>(
+  const fileId = await tx(async () => {
+    const row = await get<{ file_id: string }>(
       "SELECT file_id FROM product_images WHERE id = ? AND product_id = ?",
       imageId,
       productId,
     );
     if (!row) throw notFound("Photo");
-    run("DELETE FROM product_images WHERE id = ?", imageId);
-    run("DELETE FROM files WHERE id = ?", row.file_id);
+    await run("DELETE FROM product_images WHERE id = ?", imageId);
+    await run("DELETE FROM files WHERE id = ?", row.file_id);
     return row.file_id;
   });
-  discardFile(fileId);
+  await discardFile(fileId);
   return getProduct(productId);
 }
 
@@ -264,8 +264,8 @@ export function removeProductImage(productId: string, imageId: string, actor: Se
  * A product photo, for anyone. Only files recorded as product photos are
  * served this way; evidence uploads share the storage but never this route.
  */
-export function readProductImage(fileId: string): StoredFile {
-  if (!get("SELECT 1 FROM product_images WHERE file_id = ?", fileId)) throw notFound("Photo");
+export async function readProductImage(fileId: string): Promise<StoredFile> {
+  if (!await get("SELECT 1 FROM product_images WHERE file_id = ?", fileId)) throw notFound("Photo");
   return openFile(fileId);
 }
 
@@ -334,12 +334,12 @@ const toLine = (r: OrderRow): OrderLine => ({
   status: r.status,
 });
 
-export function listOrders(): Order[] {
-  return all<OrderRow>(`${ORDER_SELECT} ORDER BY o.created_at DESC`).map(toOrder);
+export async function listOrders(): Promise<Order[]> {
+  return (await all<OrderRow>(`${ORDER_SELECT} ORDER BY o.created_at DESC, o.checkout_id, o.line_no, o.id`)).map(toOrder);
 }
 
-function getOrderRow(id: string): OrderRow {
-  const row = get<OrderRow>(`${ORDER_SELECT} WHERE o.id = ?`, id);
+async function getOrderRow(id: string): Promise<OrderRow> {
+  const row = await get<OrderRow>(`${ORDER_SELECT} WHERE o.id = ?`, id);
   if (!row) throw notFound("Order");
   return row;
 }
@@ -364,9 +364,9 @@ function toShopOrder(
   };
 }
 
-function uniqueCode(prefix: string, table: "orders" | "checkouts"): string {
+async function uniqueCode(prefix: string, table: "orders" | "checkouts"): Promise<string> {
   let code = `${prefix}-${randomCode(6)}`;
-  while (get(`SELECT 1 FROM ${table} WHERE code = ?`, code)) code = `${prefix}-${randomCode(6)}`;
+  while (await get(`SELECT 1 FROM ${table} WHERE code = ?`, code)) code = `${prefix}-${randomCode(6)}`;
   return code;
 }
 
@@ -382,24 +382,24 @@ interface Buyer {
  * transaction: if any size is short, the stock taken for earlier lines is
  * rolled back with everything else. Call inside `tx`.
  */
-function placeLines(
+async function placeLines(
   lines: { variantId: string; quantity: number }[],
   buyer: Buyer,
   /** The buyer is a signed-in member, who can go on to pay online. */
   signedIn = false,
-): ShopOrder {
+): Promise<ShopOrder> {
   // The same size listed twice is one line.
   const wanted = new Map<string, number>();
   for (const line of lines) wanted.set(line.variantId, (wanted.get(line.variantId) ?? 0) + line.quantity);
 
   const checkoutId = newId("chk");
-  const checkoutCode = uniqueCode("CHK", "checkouts");
+  const checkoutCode = await uniqueCode("CHK", "checkouts");
   const ts = nowIso();
   const priced: { product: ProductRow; variant: VariantRow; quantity: number; unit: number }[] = [];
 
   for (const [variantId, quantity] of wanted) {
-    const variant = get<VariantRow>("SELECT * FROM product_variants WHERE id = ?", variantId);
-    const product = variant && get<ProductRow>("SELECT * FROM products WHERE id = ? AND active = 1", variant.product_id);
+    const variant = await get<VariantRow>("SELECT * FROM product_variants WHERE id = ?", variantId);
+    const product = variant && await get<ProductRow>("SELECT * FROM products WHERE id = ? AND active = 1", variant.product_id);
     if (!variant || !product) {
       throw invalid("Something in your cart is no longer for sale.", { variantId: "This size is not available" });
     }
@@ -408,7 +408,7 @@ function placeLines(
     }
     // Take the units only if they are all still there. Two buyers racing for
     // the last hoodie cannot both pass this statement.
-    const taken = run(
+    const taken = await run(
       "UPDATE product_variants SET stock = stock - ? WHERE id = ? AND stock >= ?",
       quantity,
       variant.id,
@@ -427,7 +427,7 @@ function placeLines(
   }
 
   const totalCents = priced.reduce((sum, l) => sum + l.unit * l.quantity, 0);
-  run(
+  await run(
     "INSERT INTO checkouts (id, code, buyer_name, buyer_email, member_id, total_cents, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     checkoutId,
     checkoutCode,
@@ -438,15 +438,15 @@ function placeLines(
     ts,
   );
 
-  for (const line of priced) {
+  for (const [index, line] of priced.entries()) {
     const id = newId("ord");
-    const code = uniqueCode("ORD", "orders");
+    const code = await uniqueCode("ORD", "orders");
     const lineTotal = line.unit * line.quantity;
-    run(
+    await run(
       `INSERT INTO orders
          (id, code, product_id, variant_id, quantity, unit_price_cents, total_cents, buyer_name,
-          buyer_email, member_id, payment_status, status, created_at, checkout_id, product_name, size_label)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'placed', ?, ?, ?, ?)`,
+          buyer_email, member_id, payment_status, status, created_at, checkout_id, product_name, size_label, line_no)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'placed', ?, ?, ?, ?, ?)`,
       id,
       code,
       line.product.id,
@@ -461,9 +461,10 @@ function placeLines(
       checkoutId,
       line.product.name,
       line.variant.size,
+      index + 1,
     );
     // Owed, not collected: the order stays unpaid until staff record the payment.
-    recordTransaction({
+    await recordTransaction({
       type: "income",
       category: "merchandise",
       amountCents: lineTotal,
@@ -478,17 +479,17 @@ function placeLines(
 
   return toShopOrder(
     { code: checkoutCode, created_at: ts, buyer_name: buyer.name, member_id: buyer.memberId },
-    all<OrderRow>(`${ORDER_SELECT} WHERE o.checkout_id = ? ORDER BY o.rowid`, checkoutId),
+    await all<OrderRow>(`${ORDER_SELECT} WHERE o.checkout_id = ? ORDER BY o.line_no, o.id`, checkoutId),
     signedIn,
   );
 }
 
 /** A visitor checks out. The member price needs a member number and email that match an active member. */
-export function checkout(input: CheckoutInput): ShopOrder {
-  return tx(() => {
+export async function checkout(input: CheckoutInput): Promise<ShopOrder> {
+  return tx(async () => {
     let memberId: string | null = null;
     if (input.memberNo) {
-      const member = findActiveMember(input.email, input.memberNo);
+      const member = await findActiveMember(input.email, input.memberNo);
       if (!member) {
         throw invalid("We could not apply the member price.", {
           memberNo:
@@ -505,33 +506,33 @@ export function checkout(input: CheckoutInput): ShopOrder {
  * A signed-in member checks out. Their name and email come from their member
  * record, and the member price applies only while a paid term covers today.
  */
-export function checkoutAsMember(items: { variantId: string; quantity: number }[], memberId: string): ShopOrder {
-  return tx(() => {
-    const member = get<{ name: string; email: string; member_no: string }>(
+export async function checkoutAsMember(items: { variantId: string; quantity: number }[], memberId: string): Promise<ShopOrder> {
+  return tx(async () => {
+    const member = await get<{ name: string; email: string; member_no: string }>(
       "SELECT name, email, member_no FROM members WHERE id = ?",
       memberId,
     );
     if (!member) throw notFound("Member");
-    const active = findActiveMember(member.email, member.member_no);
+    const active = await findActiveMember(member.email, member.member_no);
     return placeLines(items, { name: member.name, email: member.email, memberId: active ? active.id : null }, true);
   });
 }
 
 /** Orders one product in one size. Kept for the staff desk and older callers; it is a one-line checkout. */
-export function placeOrder(input: OrderInput): PublicOrder {
-  return tx(() => {
-    if (!get("SELECT 1 FROM products WHERE id = ? AND active = 1", input.productId)) throw notFound("Product");
-    if (!get("SELECT 1 FROM product_variants WHERE id = ? AND product_id = ?", input.variantId, input.productId)) {
+export async function placeOrder(input: OrderInput): Promise<PublicOrder> {
+  return tx(async () => {
+    if (!await get("SELECT 1 FROM products WHERE id = ? AND active = 1", input.productId)) throw notFound("Product");
+    if (!await get("SELECT 1 FROM product_variants WHERE id = ? AND product_id = ?", input.variantId, input.productId)) {
       throw invalid("Choose a size.", { variantId: "This size is not available" });
     }
-    const order = checkout({
+    const order = await checkout({
       items: [{ variantId: input.variantId, quantity: input.quantity }],
       name: input.name,
       email: input.email,
       memberNo: input.memberNo,
     });
     const line = order.lines[0];
-    const code = get<{ code: string }>("SELECT code FROM orders WHERE id = ?", line.orderId)!.code;
+    const code = (await get<{ code: string }>("SELECT code FROM orders WHERE id = ?", line.orderId))!.code;
     return {
       code,
       productName: line.productName,
@@ -549,11 +550,11 @@ export function placeOrder(input: OrderInput): PublicOrder {
  * under their email, newest first. Orders that predate checkouts appear as
  * single-line orders. Nobody else's orders can appear here.
  */
-export function listMemberOrders(memberId: string): ShopOrder[] {
-  const member = get<{ email: string }>("SELECT email FROM members WHERE id = ?", memberId);
+export async function listMemberOrders(memberId: string): Promise<ShopOrder[]> {
+  const member = await get<{ email: string }>("SELECT email FROM members WHERE id = ?", memberId);
   if (!member) throw notFound("Member");
-  const rows = all<OrderRow>(
-    `${ORDER_SELECT} WHERE o.member_id = ? OR o.buyer_email = ? ORDER BY o.created_at DESC, o.rowid`,
+  const rows = await all<OrderRow>(
+    `${ORDER_SELECT} WHERE o.member_id = ? OR o.buyer_email = ? ORDER BY o.created_at DESC, o.checkout_id, o.line_no, o.id`,
     memberId,
     member.email,
   );
@@ -581,17 +582,17 @@ export function listMemberOrders(memberId: string): ShopOrder[] {
  * still owed. Ownership is the same rule as the order history above; an order
  * that is not theirs is reported as not found, the same as one that does not exist.
  */
-export function memberOrder(
+export async function memberOrder(
   memberId: string,
   code: string,
-): { order: ShopOrder; owed: { orderId: string; amountCents: number }[] } {
-  const member = get<{ email: string }>("SELECT email FROM members WHERE id = ?", memberId);
+): Promise<{ order: ShopOrder; owed: { orderId: string; amountCents: number }[] }> {
+  const member = await get<{ email: string }>("SELECT email FROM members WHERE id = ?", memberId);
   if (!member) throw notFound("Member");
   const wanted = code.trim().toUpperCase();
-  const rows = all<OrderRow>(
+  const rows = await all<OrderRow>(
     `${ORDER_SELECT}
      WHERE (c.code = ? OR (o.checkout_id IS NULL AND o.code = ?)) AND (o.member_id = ? OR o.buyer_email = ?)
-     ORDER BY o.rowid`,
+     ORDER BY o.line_no, o.id`,
     wanted,
     wanted,
     memberId,
@@ -622,21 +623,21 @@ export interface OrderActionResult {
   refundDueCents: number;
 }
 
-export function actOnOrder(
+export async function actOnOrder(
   id: string,
   action: "pay" | "fulfil" | "cancel",
   method: PaymentMethod,
   actor: SessionUser | null,
-): OrderActionResult {
+): Promise<OrderActionResult> {
   const user = requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    const row = getOrderRow(id);
+  return tx(async () => {
+    const row = await getOrderRow(id);
     let refundDueCents = 0;
     if (row.status === "cancelled") throw conflict("order_cancelled", "This order was cancelled.");
 
     if (action === "pay") {
       if (row.payment_status === "paid") throw conflict("not_pending", "This order is already paid.");
-      settlePendingFor({ orderId: id }, method);
+      await settlePendingFor({ orderId: id }, method);
     }
 
     if (action === "fulfil") {
@@ -644,20 +645,20 @@ export function actOnOrder(
       if (row.payment_status !== "paid") {
         throw conflict("payment_required", "Collect payment before handing the item over.");
       }
-      run("UPDATE orders SET status = 'fulfilled' WHERE id = ?", id);
+      await run("UPDATE orders SET status = 'fulfilled' WHERE id = ?", id);
     }
 
     if (action === "cancel") {
       if (row.status === "fulfilled") {
         throw conflict("already_fulfilled", "This order was already handed over and cannot be cancelled.");
       }
-      run("UPDATE orders SET status = 'cancelled' WHERE id = ?", id);
-      run("UPDATE product_variants SET stock = stock + ? WHERE id = ?", row.quantity, row.variant_id);
+      await run("UPDATE orders SET status = 'cancelled' WHERE id = ?", id);
+      await run("UPDATE product_variants SET stock = stock + ? WHERE id = ?", row.quantity, row.variant_id);
       if (row.payment_status === "pending") {
-        voidPendingFor({ orderId: id }, "Order cancelled");
+        await voidPendingFor({ orderId: id }, "Order cancelled");
       } else {
         refundDueCents = row.total_cents;
-        recordTransaction({
+        await recordTransaction({
           type: "expense",
           category: "refund",
           amountCents: row.total_cents,
@@ -671,6 +672,6 @@ export function actOnOrder(
         });
       }
     }
-    return { order: toOrder(getOrderRow(id)), refundDueCents };
+    return { order: toOrder(await getOrderRow(id)), refundDueCents };
   });
 }

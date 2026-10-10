@@ -23,8 +23,8 @@ import {
 import { appError, eventInput, freshDb, person, publishedEvent, type Staff } from "./helpers";
 
 let staff: Staff;
-beforeEach(() => {
-  staff = freshDb();
+beforeEach(async () => {
+  staff = await freshDb();
 });
 
 const tx = (overrides: Partial<TransactionInput>): TransactionInput =>
@@ -59,19 +59,19 @@ describe("money helpers", () => {
 });
 
 describe("authentication", () => {
-  it("issues a session for the right password and rejects the wrong one", () => {
-    expect(appError(() => login("admin@test.example", "nope")).code).toBe("invalid_credentials");
-    expect(appError(() => login("nobody@test.example", "password-1")).code).toBe("invalid_credentials");
-    const session = login("ADMIN@test.example", "password-1");
-    expect(getSessionUser(session.token)?.role).toBe("admin");
-    expect(getSessionUser("forged-token")).toBeNull();
-    logout(session.token);
-    expect(getSessionUser(session.token)).toBeNull();
+  it("issues a session for the right password and rejects the wrong one", async () => {
+    expect((await appError(() => login("admin@test.example", "nope"))).code).toBe("invalid_credentials");
+    expect((await appError(() => login("nobody@test.example", "password-1"))).code).toBe("invalid_credentials");
+    const session = await login("ADMIN@test.example", "password-1");
+    expect((await getSessionUser(session.token))?.role).toBe("admin");
+    expect(await getSessionUser("forged-token")).toBeNull();
+    await logout(session.token);
+    expect(await getSessionUser(session.token)).toBeNull();
   });
-  it("expires sessions", () => {
-    const session = login("admin@test.example", "password-1");
+  it("expires sessions", async () => {
+    const session = await login("admin@test.example", "password-1");
     setClock(() => new Date(Date.now() + 8 * 86_400_000));
-    expect(getSessionUser(session.token)).toBeNull();
+    expect(await getSessionUser(session.token)).toBeNull();
   });
 });
 
@@ -87,46 +87,46 @@ describe("events", () => {
     expect(eventInputSchema.safeParse({ ...base, title: "" }).success).toBe(false);
   });
 
-  it("only lets permitted roles manage events", () => {
-    expect(appError(() => createEvent(eventInput(), null)).status).toBe(401);
-    expect(appError(() => createEvent(eventInput(), staff.treasurer)).status).toBe(403);
-    const event = createEvent(eventInput(), staff.organizer);
+  it("only lets permitted roles manage events", async () => {
+    expect((await appError(() => createEvent(eventInput(), null))).status).toBe(401);
+    expect((await appError(() => createEvent(eventInput(), staff.treasurer))).status).toBe(403);
+    const event = await createEvent(eventInput(), staff.organizer);
     expect(event.status).toBe("draft");
-    expect(appError(() => setEventStatus(event.id, "published", staff.treasurer)).status).toBe(403);
+    expect((await appError(() => setEventStatus(event.id, "published", staff.treasurer))).status).toBe(403);
   });
 
-  it("hides drafts from the public and shows published events", () => {
-    const draft = createEvent(eventInput(), staff.organizer);
-    expect(listPublicEvents()).toHaveLength(0);
-    expect(appError(() => getPublicEvent(draft.id)).status).toBe(404);
-    expect(appError(() => registerForEvent(draft.id, person(1))).status).toBe(404);
-    setEventStatus(draft.id, "published", staff.organizer);
-    expect(listPublicEvents()).toHaveLength(1);
-    expect(getPublicEvent(draft.id).registrationOpen).toBe(true);
+  it("hides drafts from the public and shows published events", async () => {
+    const draft = await createEvent(eventInput(), staff.organizer);
+    expect(await listPublicEvents()).toHaveLength(0);
+    expect((await appError(() => getPublicEvent(draft.id))).status).toBe(404);
+    expect((await appError(() => registerForEvent(draft.id, person(1)))).status).toBe(404);
+    await setEventStatus(draft.id, "published", staff.organizer);
+    expect(await listPublicEvents()).toHaveLength(1);
+    expect((await getPublicEvent(draft.id)).registrationOpen).toBe(true);
   });
 
-  it("refuses to cut capacity below the number already registered", () => {
-    const event = publishedEvent(staff, { capacity: 5 });
-    registerForEvent(event.id, person(1));
-    registerForEvent(event.id, person(2));
-    const err = appError(() => updateEvent(event.id, eventInput({ capacity: 1 }), staff.organizer));
+  it("refuses to cut capacity below the number already registered", async () => {
+    const event = await publishedEvent(staff, { capacity: 5 });
+    await registerForEvent(event.id, person(1));
+    await registerForEvent(event.id, person(2));
+    const err = await appError(() => updateEvent(event.id, eventInput({ capacity: 1 }), staff.organizer));
     expect(err.status).toBe(422);
     expect(err.fields?.capacity).toBeTruthy();
-    expect(updateEvent(event.id, eventInput({ capacity: 2 }), staff.organizer).stats.remaining).toBe(0);
+    expect((await updateEvent(event.id, eventInput({ capacity: 2 }), staff.organizer)).stats.remaining).toBe(0);
   });
 
-  it("will not unpublish an event that has registrations", () => {
-    const event = publishedEvent(staff);
-    registerForEvent(event.id, person(1));
-    expect(appError(() => setEventStatus(event.id, "draft", staff.organizer)).code).toBe("has_registrations");
+  it("will not unpublish an event that has registrations", async () => {
+    const event = await publishedEvent(staff);
+    await registerForEvent(event.id, person(1));
+    expect((await appError(() => setEventStatus(event.id, "draft", staff.organizer))).code).toBe("has_registrations");
   });
 });
 
 describe("registration and capacity", () => {
   it("creates a unique ticket with a pending charge", async () => {
-    const event = publishedEvent(staff);
-    const a = registerForEvent(event.id, person(1));
-    const b = registerForEvent(event.id, person(2));
+    const event = await publishedEvent(staff);
+    const a = await registerForEvent(event.id, person(1));
+    const b = await registerForEvent(event.id, person(2));
     expect(a.code).toMatch(/^SKY-[2-9A-Z]{5}-[2-9A-Z]{5}$/);
     expect(a.code).not.toBe(b.code);
     expect(a.paymentStatus).toBe("pending");
@@ -137,50 +137,50 @@ describe("registration and capacity", () => {
     expect(pub.event.title).toBe("Test Event");
     expect(JSON.stringify(pub)).not.toContain("student1@campus.example"); // no email on the public ticket
 
-    const pending = listTransactions({ eventId: event.id });
+    const pending = await listTransactions({ eventId: event.id });
     expect(pending).toHaveLength(2);
     expect(pending.every((t) => t.status === "pending" && t.source === "ticket")).toBe(true);
   });
 
-  it("enforces capacity and frees a seat when a ticket is cancelled", () => {
-    const event = publishedEvent(staff, { capacity: 2 });
-    const first = registerForEvent(event.id, person(1));
-    registerForEvent(event.id, person(2));
-    expect(appError(() => registerForEvent(event.id, person(3))).code).toBe("sold_out");
-    expect(getEvent(event.id).stats.remaining).toBe(0);
-    expect(getPublicEvent(event.id).closedReason).toBe("sold_out");
+  it("enforces capacity and frees a seat when a ticket is cancelled", async () => {
+    const event = await publishedEvent(staff, { capacity: 2 });
+    const first = await registerForEvent(event.id, person(1));
+    await registerForEvent(event.id, person(2));
+    expect((await appError(() => registerForEvent(event.id, person(3)))).code).toBe("sold_out");
+    expect((await getEvent(event.id)).stats.remaining).toBe(0);
+    expect((await getPublicEvent(event.id)).closedReason).toBe("sold_out");
 
-    cancelTicket(first.code, staff.organizer);
-    expect(getEvent(event.id).stats.registered).toBe(1);
-    expect(registerForEvent(event.id, person(3)).status).toBe("valid");
-    expect(appError(() => registerForEvent(event.id, person(4))).code).toBe("sold_out");
+    await cancelTicket(first.code, staff.organizer);
+    expect((await getEvent(event.id)).stats.registered).toBe(1);
+    expect((await registerForEvent(event.id, person(3))).status).toBe("valid");
+    expect((await appError(() => registerForEvent(event.id, person(4)))).code).toBe("sold_out");
   });
 
-  it("allows one ticket per email per event, ignoring case", () => {
-    const event = publishedEvent(staff);
-    registerForEvent(event.id, person(1));
-    const err = appError(() => registerForEvent(event.id, { ...person(1), email: "STUDENT1@campus.example" }));
+  it("allows one ticket per email per event, ignoring case", async () => {
+    const event = await publishedEvent(staff);
+    await registerForEvent(event.id, person(1));
+    const err = await appError(() => registerForEvent(event.id, { ...person(1), email: "STUDENT1@campus.example" }));
     expect(err.code).toBe("already_registered");
-    const other = publishedEvent(staff, { title: "Second Event" });
-    expect(registerForEvent(other.id, person(1)).eventId).toBe(other.id);
+    const other = await publishedEvent(staff, { title: "Second Event" });
+    expect((await registerForEvent(other.id, person(1))).eventId).toBe(other.id);
   });
 
-  it("closes registration once the event has ended or been cancelled", () => {
-    const event = publishedEvent(staff);
+  it("closes registration once the event has ended or been cancelled", async () => {
+    const event = await publishedEvent(staff);
     setClock(() => new Date(Date.now() + 3 * 86_400_000));
-    expect(appError(() => registerForEvent(event.id, person(1))).code).toBe("registration_closed");
-    expect(listPublicEvents()).toHaveLength(0);
+    expect((await appError(() => registerForEvent(event.id, person(1)))).code).toBe("registration_closed");
+    expect(await listPublicEvents()).toHaveLength(0);
     setClock(null);
-    setEventStatus(event.id, "cancelled", staff.organizer);
-    expect(appError(() => registerForEvent(event.id, person(1))).code).toBe("registration_closed");
+    await setEventStatus(event.id, "cancelled", staff.organizer);
+    expect((await appError(() => registerForEvent(event.id, person(1)))).code).toBe("registration_closed");
   });
 
-  it("gives free events a free ticket and no ledger entry", () => {
-    const event = publishedEvent(staff, { priceCents: 0, memberPriceCents: 0 });
-    const ticket = registerForEvent(event.id, person(1));
+  it("gives free events a free ticket and no ledger entry", async () => {
+    const event = await publishedEvent(staff, { priceCents: 0, memberPriceCents: 0 });
+    const ticket = await registerForEvent(event.id, person(1));
     expect(ticket.paymentStatus).toBe("free");
-    expect(listTransactions()).toHaveLength(0);
-    expect(scan(ticket.code).outcome).toBe("checked_in");
+    expect(await listTransactions()).toHaveLength(0);
+    expect((await scan(ticket.code)).outcome).toBe("checked_in");
   });
 });
 
@@ -196,100 +196,100 @@ describe("ticket codes", () => {
 });
 
 describe("check-in", () => {
-  it("requires payment, then admits once and only once", () => {
-    const event = publishedEvent(staff);
-    const ticket = registerForEvent(event.id, person(1));
+  it("requires payment, then admits once and only once", async () => {
+    const event = await publishedEvent(staff);
+    const ticket = await registerForEvent(event.id, person(1));
 
-    expect(verifyTicket(ticket.code, null, staff.organizer).outcome).toBe("payment_required");
-    expect(scan(ticket.code).outcome).toBe("payment_required");
-    expect(getEvent(event.id).stats.checkedIn).toBe(0);
+    expect((await verifyTicket(ticket.code, null, staff.organizer)).outcome).toBe("payment_required");
+    expect((await scan(ticket.code)).outcome).toBe("payment_required");
+    expect((await getEvent(event.id)).stats.checkedIn).toBe(0);
 
-    const admitted = scan(ticket.code, { collectPayment: true, method: "upi" });
+    const admitted = await scan(ticket.code, { collectPayment: true, method: "upi" });
     expect(admitted.outcome).toBe("checked_in");
     expect(admitted.ticket?.paymentStatus).toBe("paid");
     expect(admitted.ticket?.checkedInAt).toBeTruthy();
 
-    const again = scan(ticket.code);
+    const again = await scan(ticket.code);
     expect(again.outcome).toBe("already_checked_in");
     expect(again.ticket?.checkedInAt).toBe(admitted.ticket?.checkedInAt);
-    expect(scan(ticket.code, { collectPayment: true }).outcome).toBe("already_checked_in");
+    expect((await scan(ticket.code, { collectPayment: true })).outcome).toBe("already_checked_in");
 
-    const stats = getEvent(event.id).stats;
+    const stats = (await getEvent(event.id)).stats;
     expect(stats.checkedIn).toBe(1);
     expect(stats.paid).toBe(1);
 
     // The charge was settled exactly once.
-    const entries = listTransactions({ eventId: event.id });
+    const entries = await listTransactions({ eventId: event.id });
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ status: "settled", method: "upi", amountCents: 50000 });
   });
 
-  it("rejects unknown, malformed, wrong-event and cancelled tickets", () => {
-    const event = publishedEvent(staff);
-    const other = publishedEvent(staff, { title: "Other Event" });
-    const ticket = registerForEvent(event.id, person(1), { actor: staff.organizer, payNow: "cash" });
+  it("rejects unknown, malformed, wrong-event and cancelled tickets", async () => {
+    const event = await publishedEvent(staff);
+    const other = await publishedEvent(staff, { title: "Other Event" });
+    const ticket = await registerForEvent(event.id, person(1), { actor: staff.organizer, payNow: "cash" });
 
-    expect(scan("SKY-22222-22222").outcome).toBe("not_found");
-    expect(scan("not a code").outcome).toBe("not_found");
-    expect(scan(ticket.code, { eventId: other.id }).outcome).toBe("wrong_event");
-    expect(getEvent(event.id).stats.checkedIn).toBe(0);
+    expect((await scan("SKY-22222-22222")).outcome).toBe("not_found");
+    expect((await scan("not a code")).outcome).toBe("not_found");
+    expect((await scan(ticket.code, { eventId: other.id })).outcome).toBe("wrong_event");
+    expect((await getEvent(event.id)).stats.checkedIn).toBe(0);
 
-    const cancelled = registerForEvent(event.id, person(2));
-    cancelTicket(cancelled.code, staff.organizer);
-    expect(scan(cancelled.code).outcome).toBe("cancelled");
+    const cancelled = await registerForEvent(event.id, person(2));
+    await cancelTicket(cancelled.code, staff.organizer);
+    expect((await scan(cancelled.code)).outcome).toBe("cancelled");
 
-    expect(scan(ticket.code, { eventId: event.id }).outcome).toBe("checked_in");
+    expect((await scan(ticket.code, { eventId: event.id })).outcome).toBe("checked_in");
   });
 
-  it("is restricted to staff", () => {
-    const event = publishedEvent(staff);
-    const ticket = registerForEvent(event.id, person(1));
-    expect(appError(() => checkIn({ code: ticket.code, eventId: null, collectPayment: true, method: "cash" }, null)).status).toBe(401);
-    expect(appError(() => payTicket(ticket.code, "cash", null)).status).toBe(401);
-    expect(appError(() => registerForEvent(event.id, person(2), { payNow: "cash" })).status).toBe(401);
+  it("is restricted to staff", async () => {
+    const event = await publishedEvent(staff);
+    const ticket = await registerForEvent(event.id, person(1));
+    expect((await appError(() => checkIn({ code: ticket.code, eventId: null, collectPayment: true, method: "cash" }, null))).status).toBe(401);
+    expect((await appError(() => payTicket(ticket.code, "cash", null))).status).toBe(401);
+    expect((await appError(() => registerForEvent(event.id, person(2), { payNow: "cash" }))).status).toBe(401);
   });
 
-  it("refuses entry and records refunds when the event is cancelled", () => {
-    const event = publishedEvent(staff);
-    const paid = registerForEvent(event.id, person(1), { actor: staff.organizer, payNow: "cash" });
-    const unpaid = registerForEvent(event.id, person(2));
+  it("refuses entry and records refunds when the event is cancelled", async () => {
+    const event = await publishedEvent(staff);
+    const paid = await registerForEvent(event.id, person(1), { actor: staff.organizer, payNow: "cash" });
+    const unpaid = await registerForEvent(event.id, person(2));
 
-    const change = setEventStatus(event.id, "cancelled", staff.organizer);
+    const change = await setEventStatus(event.id, "cancelled", staff.organizer);
     expect(change.voidedPendingCount).toBe(1);
     expect(change.refundsDueCents).toBe(50000);
-    expect(scan(paid.code).outcome).toBe("event_cancelled");
-    expect(scan(unpaid.code).outcome).toBe("event_cancelled");
+    expect((await scan(paid.code)).outcome).toBe("event_cancelled");
+    expect((await scan(unpaid.code)).outcome).toBe("event_cancelled");
 
     // No live ticket is left pointing at a voided charge, and none counts as registered.
-    const after = getEvent(event.id);
+    const after = await getEvent(event.id);
     expect(after.stats).toMatchObject({ registered: 0, pending: 0, paid: 0 });
-    const orphans = get<{ n: number }>(
+    const orphans = (await get<{ n: number }>(
       `SELECT COUNT(*) AS n FROM tickets t JOIN transactions x ON x.ticket_id = t.id AND x.source = 'ticket'
        WHERE t.status = 'valid' AND x.voided_at IS NOT NULL`,
-    )!;
+    ))!;
     expect(orphans.n).toBe(0);
-    expect(appError(() => payTicket(unpaid.code, "cash", staff.organizer)).status).toBe(409);
+    expect((await appError(() => payTicket(unpaid.code, "cash", staff.organizer))).status).toBe(409);
 
-    const finance = getEvent(event.id).finance;
+    const finance = (await getEvent(event.id)).finance;
     expect(finance.incomeSettledCents).toBe(50000);
     expect(finance.incomePendingCents).toBe(0);
     expect(finance.expensePendingCents).toBe(50000);
     expect(finance.projectedNetCents).toBe(0);
-    expect(appError(() => setEventStatus(event.id, "published", staff.organizer)).code).toBe("event_cancelled");
+    expect((await appError(() => setEventStatus(event.id, "published", staff.organizer))).code).toBe("event_cancelled");
   });
 
-  it("records a refund when a paid ticket is cancelled", () => {
-    const event = publishedEvent(staff);
-    const ticket = registerForEvent(event.id, person(1), { actor: staff.organizer, payNow: "card" });
-    expect(cancelTicket(ticket.code, staff.organizer).refundDueCents).toBe(50000);
-    const refund = listTransactions({ type: "expense" });
+  it("records a refund when a paid ticket is cancelled", async () => {
+    const event = await publishedEvent(staff);
+    const ticket = await registerForEvent(event.id, person(1), { actor: staff.organizer, payNow: "card" });
+    expect((await cancelTicket(ticket.code, staff.organizer)).refundDueCents).toBe(50000);
+    const refund = await listTransactions({ type: "expense" });
     expect(refund).toHaveLength(1);
     expect(refund[0]).toMatchObject({ category: "refund", status: "pending", amountCents: 50000 });
   });
 });
 
 describe("finance", () => {
-  it("validates transactions", () => {
+  it("validates transactions", async () => {
     const ok = { type: "expense", category: "venue", amountCents: 100, occurredOn: "2026-10-10", description: "Hall" };
     expect(transactionInputSchema.safeParse(ok).success).toBe(true);
     expect(transactionInputSchema.safeParse({ ...ok, amountCents: 0 }).success).toBe(false);
@@ -298,34 +298,34 @@ describe("finance", () => {
     expect(transactionInputSchema.safeParse({ ...ok, category: "tickets" }).success).toBe(false); // income category on an expense
     expect(transactionInputSchema.safeParse({ ...ok, occurredOn: "2026-02-30" }).success).toBe(false);
     expect(transactionInputSchema.safeParse({ ...ok, description: "" }).success).toBe(false);
-    expect(appError(() => createTransaction(tx({ eventId: "evt_missing" }), staff.treasurer)).status).toBe(422);
+    expect((await appError(() => createTransaction(tx({ eventId: "evt_missing" }), staff.treasurer))).status).toBe(422);
   });
 
-  it("keeps organizers out of the ledger: they file claims instead", () => {
-    expect(appError(() => createTransaction(tx({}), null)).status).toBe(401);
-    expect(appError(() => createTransaction(tx({ status: "settled" }), staff.organizer)).status).toBe(403);
-    expect(appError(() => createTransaction(tx({ type: "income", category: "donation", status: "pending" }), staff.organizer)).status).toBe(403);
-    expect(appError(() => createTransaction(tx({ status: "pending", counterparty: "Organizer" }), staff.organizer)).status).toBe(403);
-    const claim = createTransaction(tx({ status: "pending", counterparty: "Supplier" }), staff.treasurer);
+  it("keeps organizers out of the ledger: they file claims instead", async () => {
+    expect((await appError(() => createTransaction(tx({}), null))).status).toBe(401);
+    expect((await appError(() => createTransaction(tx({ status: "settled" }), staff.organizer))).status).toBe(403);
+    expect((await appError(() => createTransaction(tx({ type: "income", category: "donation", status: "pending" }), staff.organizer))).status).toBe(403);
+    expect((await appError(() => createTransaction(tx({ status: "pending", counterparty: "Organizer" }), staff.organizer))).status).toBe(403);
+    const claim = await createTransaction(tx({ status: "pending", counterparty: "Supplier" }), staff.treasurer);
     expect(claim.status).toBe("pending");
-    expect(appError(() => settleTransaction(claim.id, "bank", staff.organizer)).status).toBe(403);
-    expect(settleTransaction(claim.id, "bank", staff.treasurer).status).toBe("settled");
-    expect(appError(() => settleTransaction(claim.id, "bank", staff.treasurer)).code).toBe("not_pending");
+    expect((await appError(() => settleTransaction(claim.id, "bank", staff.organizer))).status).toBe(403);
+    expect((await settleTransaction(claim.id, "bank", staff.treasurer)).status).toBe("settled");
+    expect((await appError(() => settleTransaction(claim.id, "bank", staff.treasurer))).code).toBe("not_pending");
   });
 
-  it("keeps collected and pending money apart and reconciles with the ledger", () => {
-    const gala = publishedEvent(staff, { title: "Gala" });
-    registerForEvent(gala.id, person(1), { actor: staff.organizer, payNow: "upi" }); // 500 collected
-    registerForEvent(gala.id, person(2), { actor: staff.organizer, payNow: "cash" }); // 500 collected
-    registerForEvent(gala.id, person(3)); // 500 pending
-    createTransaction(tx({ type: "income", category: "sponsorship", amountCents: 200000, eventId: gala.id }), staff.treasurer);
-    createTransaction(tx({ category: "venue", amountCents: 150000, eventId: gala.id }), staff.treasurer);
-    createTransaction(tx({ category: "catering", amountCents: 80000, status: "pending", eventId: gala.id }), staff.treasurer);
-    createTransaction(tx({ type: "income", category: "donation", amountCents: 30000 }), staff.treasurer); // not tied to an event
-    const mistake = createTransaction(tx({ category: "supplies", amountCents: 999900 }), staff.treasurer);
-    voidTransaction(mistake.id, "Entered twice", staff.treasurer);
+  it("keeps collected and pending money apart and reconciles with the ledger", async () => {
+    const gala = await publishedEvent(staff, { title: "Gala" });
+    await registerForEvent(gala.id, person(1), { actor: staff.organizer, payNow: "upi" }); // 500 collected
+    await registerForEvent(gala.id, person(2), { actor: staff.organizer, payNow: "cash" }); // 500 collected
+    await registerForEvent(gala.id, person(3)); // 500 pending
+    await createTransaction(tx({ type: "income", category: "sponsorship", amountCents: 200000, eventId: gala.id }), staff.treasurer);
+    await createTransaction(tx({ category: "venue", amountCents: 150000, eventId: gala.id }), staff.treasurer);
+    await createTransaction(tx({ category: "catering", amountCents: 80000, status: "pending", eventId: gala.id }), staff.treasurer);
+    await createTransaction(tx({ type: "income", category: "donation", amountCents: 30000 }), staff.treasurer); // not tied to an event
+    const mistake = await createTransaction(tx({ category: "supplies", amountCents: 999900 }), staff.treasurer);
+    await voidTransaction(mistake.id, "Entered twice", staff.treasurer);
 
-    const f = getEvent(gala.id).finance;
+    const f = (await getEvent(gala.id)).finance;
     expect(f.ticketIncomeSettledCents).toBe(100000);
     expect(f.ticketIncomePendingCents).toBe(50000);
     expect(f.incomeSettledCents).toBe(300000);
@@ -336,7 +336,7 @@ describe("finance", () => {
     expect(f.projectedNetCents).toBe(120000); // + 500 pending − 800 owed
 
     // Independent recomputation straight from the ledger rows.
-    const rows = listTransactions();
+    const rows = await listTransactions();
     const sum = (type: string, status: string, eventId?: string) =>
       rows
         .filter((r) => r.type === type && r.status === status && (eventId === undefined || r.eventId === eventId))
@@ -345,7 +345,7 @@ describe("finance", () => {
     expect(f.incomeSettledCents).toBe(sum("income", "settled", gala.id));
     expect(f.expenseSettledCents).toBe(sum("expense", "settled", gala.id));
 
-    const summary = getFinanceSummary();
+    const summary = await getFinanceSummary();
     expect(summary.incomeSettledCents).toBe(sum("income", "settled"));
     expect(summary.incomePendingCents).toBe(sum("income", "pending"));
     expect(summary.expenseSettledCents).toBe(sum("expense", "settled"));
@@ -363,13 +363,13 @@ describe("finance", () => {
     expect(summary.byEvent.find((e) => e.eventId === null)?.incomeSettledCents).toBe(30000);
   });
 
-  it("does not let ticket charges be edited or voided by hand", () => {
-    const event = publishedEvent(staff);
-    const ticket = registerForEvent(event.id, person(1));
-    const [charge] = listTransactions({ eventId: event.id });
-    expect(appError(() => voidTransaction(charge.id, "Trying to hide it", staff.treasurer)).code).toBe("linked_entry");
+  it("does not let ticket charges be edited or voided by hand", async () => {
+    const event = await publishedEvent(staff);
+    const ticket = await registerForEvent(event.id, person(1));
+    const [charge] = await listTransactions({ eventId: event.id });
+    expect((await appError(() => voidTransaction(charge.id, "Trying to hide it", staff.treasurer))).code).toBe("linked_entry");
     // Settling it from the finance screen also marks the ticket paid.
-    settleTransaction(charge.id, "bank", staff.treasurer);
-    expect(verifyTicket(ticket.code, null, staff.organizer).outcome).toBe("valid");
+    await settleTransaction(charge.id, "bank", staff.treasurer);
+    expect((await verifyTicket(ticket.code, null, staff.organizer)).outcome).toBe("valid");
   });
 });

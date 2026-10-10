@@ -92,10 +92,10 @@ function toClaim(r: ClaimRow, actor: SessionUser): ExpenseClaim {
  * Who may file a claim: any committee account, and any member who is a
  * volunteer, meaning the committee has assigned them at least one task.
  */
-export function claimAccess(actor: SessionUser | null): ClaimAccess {
+export async function claimAccess(actor: SessionUser | null): Promise<ClaimAccess> {
   if (!actor) throw unauthorized();
   if (actor.role !== "member") return { canSubmit: true, canReview: isReviewer(actor), reason: null };
-  const volunteer = !!get("SELECT 1 FROM tasks WHERE assignee_member_id = ? LIMIT 1", actor.memberId);
+  const volunteer = !!await get("SELECT 1 FROM tasks WHERE assignee_member_id = ? LIMIT 1", actor.memberId);
   return {
     canSubmit: volunteer,
     canReview: false,
@@ -103,8 +103,8 @@ export function claimAccess(actor: SessionUser | null): ClaimAccess {
   };
 }
 
-export function submitClaim(input: ClaimInput, evidence: Buffer | null, actor: SessionUser | null): ExpenseClaim {
-  const access = claimAccess(actor);
+export async function submitClaim(input: ClaimInput, evidence: Buffer | null, actor: SessionUser | null): Promise<ExpenseClaim> {
+  const access = await claimAccess(actor);
   const user = actor!;
   if (!access.canSubmit) throw forbidden(access.reason ?? undefined);
   if (!evidence) {
@@ -113,18 +113,18 @@ export function submitClaim(input: ClaimInput, evidence: Buffer | null, actor: S
   if (input.spentOn > today()) {
     throw invalid("Check the expense date.", { spentOn: "The expense date cannot be in the future" });
   }
-  if (input.eventId && !get("SELECT 1 FROM events WHERE id = ?", input.eventId)) {
+  if (input.eventId && !await get("SELECT 1 FROM events WHERE id = ?", input.eventId)) {
     throw invalid("Choose an existing event.", { eventId: "This event no longer exists" });
   }
 
   let fileId = null as string | null;
   try {
-    return tx(() => {
-      fileId = storeImage(evidence, "claim_receipt");
+    return tx(async () => {
+      fileId = await storeImage(evidence, "claim_receipt");
       const id = newId("clm");
       let code = `CLM-${randomCode(6)}`;
-      while (get("SELECT 1 FROM expense_claims WHERE code = ?", code)) code = `CLM-${randomCode(6)}`;
-      run(
+      while (await get("SELECT 1 FROM expense_claims WHERE code = ?", code)) code = `CLM-${randomCode(6)}`;
+      await run(
         `INSERT INTO expense_claims
            (id, code, claimant_member_id, claimant_user_id, claimant_name, title, justification, notes,
             category, amount_cents, spent_on, event_id, evidence_file_id, status, created_at)
@@ -145,30 +145,30 @@ export function submitClaim(input: ClaimInput, evidence: Buffer | null, actor: S
         fileId,
         nowIso(),
       );
-      return toClaim(loadClaim(id), user);
+      return toClaim(await loadClaim(id), user);
     });
   } catch (error) {
-    if (fileId) discardFile(fileId);
+    if (fileId) await discardFile(fileId);
     throw error;
   }
 }
 
-function loadClaim(id: string): ClaimRow {
-  const row = get<ClaimRow>(`${SELECT} WHERE c.id = ?`, id);
+async function loadClaim(id: string): Promise<ClaimRow> {
+  const row = await get<ClaimRow>(`${SELECT} WHERE c.id = ?`, id);
   if (!row) throw notFound("Claim");
   return row;
 }
 
 /** Reviewers see every claim; everyone else sees only their own. */
-export function listClaims(actor: SessionUser | null): ClaimList {
-  const access = claimAccess(actor);
+export async function listClaims(actor: SessionUser | null): Promise<ClaimList> {
+  const access = await claimAccess(actor);
   const user = actor!;
   const order = "ORDER BY (c.status IN ('rejected','paid')), c.created_at DESC LIMIT 500";
   const rows = access.canReview
-    ? all<ClaimRow>(`${SELECT} ${order}`)
+    ? await all<ClaimRow>(`${SELECT} ${order}`)
     : user.role === "member"
-      ? all<ClaimRow>(`${SELECT} WHERE c.claimant_member_id = ? ${order}`, user.memberId)
-      : all<ClaimRow>(`${SELECT} WHERE c.claimant_user_id = ? ${order}`, user.id);
+      ? await all<ClaimRow>(`${SELECT} WHERE c.claimant_member_id = ? ${order}`, user.memberId)
+      : await all<ClaimRow>(`${SELECT} WHERE c.claimant_user_id = ? ${order}`, user.id);
   return { ...access, claims: rows.map((r) => toClaim(r, user)) };
 }
 
@@ -177,10 +177,10 @@ export function listClaims(actor: SessionUser | null): ClaimList {
  * Every UPDATE names the statuses it applies to, so a claim cannot be approved
  * twice and so cannot reach the ledger twice.
  */
-export function reviewClaim(id: string, input: ClaimReviewInput, actor: SessionUser | null): ExpenseClaim {
+export async function reviewClaim(id: string, input: ClaimReviewInput, actor: SessionUser | null): Promise<ExpenseClaim> {
   const user = requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    const row = loadClaim(id);
+  return tx(async () => {
+    const row = await loadClaim(id);
     if (isClaimant(row, user)) {
       throw forbidden("You cannot review your own claim. Ask the other reviewer.");
     }
@@ -188,7 +188,7 @@ export function reviewClaim(id: string, input: ClaimReviewInput, actor: SessionU
     const refuse = () => conflict("invalid_claim_status", "This claim has already moved on. Reload to see where it stands.");
 
     if (input.action === "start_review") {
-      const changed = run(
+      const changed = await run(
         "UPDATE expense_claims SET status = 'under_review', reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'submitted'",
         user.id,
         ts,
@@ -198,7 +198,7 @@ export function reviewClaim(id: string, input: ClaimReviewInput, actor: SessionU
     }
 
     if (input.action === "reject") {
-      const changed = run(
+      const changed = await run(
         `UPDATE expense_claims SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = ?
          WHERE id = ? AND status IN ('submitted','under_review')`,
         input.reason,
@@ -210,7 +210,7 @@ export function reviewClaim(id: string, input: ClaimReviewInput, actor: SessionU
     }
 
     if (input.action === "approve") {
-      const changed = run(
+      const changed = await run(
         `UPDATE expense_claims SET status = 'approved', review_note = ?, reviewed_by = ?, reviewed_at = ?
          WHERE id = ? AND status IN ('submitted','under_review')`,
         input.note,
@@ -220,7 +220,7 @@ export function reviewClaim(id: string, input: ClaimReviewInput, actor: SessionU
       );
       if (changed.changes !== 1) throw refuse();
       // The one place a claim enters the books: money now owed to the claimant.
-      const transactionId = recordTransaction({
+      const transactionId = await recordTransaction({
         type: "expense",
         category: row.category,
         amountCents: row.amount_cents,
@@ -233,7 +233,7 @@ export function reviewClaim(id: string, input: ClaimReviewInput, actor: SessionU
         memberId: row.claimant_member_id,
         createdBy: user.id,
       });
-      run("UPDATE expense_claims SET transaction_id = ? WHERE id = ?", transactionId, id);
+      await run("UPDATE expense_claims SET transaction_id = ? WHERE id = ?", transactionId, id);
     }
 
     if (input.action === "pay") {
@@ -241,16 +241,16 @@ export function reviewClaim(id: string, input: ClaimReviewInput, actor: SessionU
         throw conflict("not_approved", "Only an approved claim can be paid.");
       }
       // Goes through the ledger's own settlement, which marks the claim paid.
-      settleTransaction(row.transaction_id, input.method, user);
+      await settleTransaction(row.transaction_id, input.method, user);
     }
 
-    return toClaim(loadClaim(id), user);
+    return toClaim(await loadClaim(id), user);
   });
 }
 
 /** Whether `actor` may open the receipt photo with this file id: reviewers and the claimant. */
-export function mayReadClaimEvidence(fileId: string, actor: SessionUser): boolean | null {
-  const row = get<Pick<ClaimRow, "claimant_member_id" | "claimant_user_id">>(
+export async function mayReadClaimEvidence(fileId: string, actor: SessionUser): Promise<boolean | null> {
+  const row = await get<Pick<ClaimRow, "claimant_member_id" | "claimant_user_id">>(
     "SELECT claimant_member_id, claimant_user_id FROM expense_claims WHERE evidence_file_id = ?",
     fileId,
   );

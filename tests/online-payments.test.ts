@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SETTINGS,
   applicationInputSchema,
@@ -20,6 +20,7 @@ import {
 } from "@/server/razorpay";
 import { getApplicationStatus, listApplications, paymentInstructions, submitApplication } from "@/server/services/applications";
 import { listTransactions } from "@/server/services/finance";
+import * as members from "@/server/services/members";
 import { createMember, listMembers, updateMember } from "@/server/services/members";
 import {
   handleRazorpayWebhook,
@@ -102,8 +103,8 @@ class FakeRazorpay implements PaymentGateway {
 let staff: Staff;
 let razorpay: FakeRazorpay;
 
-beforeEach(() => {
-  staff = freshDb();
+beforeEach(async () => {
+  staff = await freshDb();
   razorpay = new FakeRazorpay();
   setGateway(razorpay);
   process.env.SKYLINE_RAZORPAY_MODE = "test";
@@ -175,9 +176,9 @@ async function rejection(promise: Promise<unknown>): Promise<AppError> {
   throw new Error("Expected an AppError, but nothing was thrown");
 }
 
-function thrown(fn: () => unknown): AppError {
+async function thrown(fn: () => unknown): Promise<AppError> {
   try {
-    fn();
+    await fn();
   } catch (error) {
     if (error instanceof AppError) return error;
     throw error;
@@ -185,17 +186,17 @@ function thrown(fn: () => unknown): AppError {
   throw new Error("Expected an AppError, but nothing was thrown");
 }
 
-const dues = () => listTransactions().filter((t) => t.category === "dues");
-const onlineRow = (id: string) =>
-  get<{ status: string; razorpay_payment_id: string | null; member_id: string | null; verified_via: string | null }>(
+const dues = async () => (await listTransactions()).filter((t) => t.category === "dues");
+const onlineRow = async (id: string) =>
+  (await get<{ status: string; razorpay_payment_id: string | null; member_id: string | null; verified_via: string | null }>(
     "SELECT status, razorpay_payment_id, member_id, verified_via FROM online_applications WHERE id = ?",
     id,
-  )!;
-const nothingActivated = () => {
-  expect(listMembers()).toHaveLength(0);
-  expect(listTransactions()).toHaveLength(0);
-  expect(get("SELECT 1 FROM membership_applications")).toBeUndefined();
-  expect(get("SELECT 1 FROM account_setup_tokens")).toBeUndefined();
+  ))!;
+const nothingActivated = async () => {
+  expect(await listMembers()).toHaveLength(0);
+  expect(await listTransactions()).toHaveLength(0);
+  expect(await get("SELECT 1 FROM membership_applications")).toBeUndefined();
+  expect(await get("SELECT 1 FROM account_setup_tokens")).toBeUndefined();
 };
 const tokenOf = (path: string) => path.split("/").pop()!;
 
@@ -269,8 +270,8 @@ describe("starting an online application", () => {
     expect(razorpay.orders).toEqual([
       { id: app.checkout!.orderId, amountCents: SETTINGS.membershipFeeCents, currency: "INR" },
     ]);
-    nothingActivated();
-    expect(getApplicationStatus(app.code, "applicant1@campus.example")).toMatchObject({
+    await nothingActivated();
+    expect(await getApplicationStatus(app.code, "applicant1@campus.example")).toMatchObject({
       status: "pending",
       online: "pending",
       memberNo: null,
@@ -281,16 +282,16 @@ describe("starting an online application", () => {
     const app = await start();
     expect(JSON.stringify(app)).not.toContain(KEY_SECRET);
     expect(JSON.stringify(app)).not.toContain(WEBHOOK_SECRET);
-    const stored = JSON.stringify(all("SELECT * FROM online_applications"));
+    const stored = JSON.stringify(await all("SELECT * FROM online_applications"));
     expect(stored).not.toContain(app.accessToken);
     expect(stored).not.toContain(KEY_SECRET);
   });
 
   it("refuses someone who is already a member or already has a manual application waiting", async () => {
-    createMember(memberInputSchema.parse({ name: "Existing", email: "applicant1@campus.example", duesPaid: true }), staff.treasurer);
+    await createMember(memberInputSchema.parse({ name: "Existing", email: "applicant1@campus.example", duesPaid: true }), staff.treasurer);
     expect(await rejection(start(1))).toMatchObject({ code: "already_member" });
 
-    submitApplication(
+    await submitApplication(
       applicationInputSchema.parse({ name: "Manual", email: "applicant2@campus.example", paymentMethod: "cash", paymentReference: "Paid Tariq" }),
       null,
     );
@@ -299,7 +300,7 @@ describe("starting an online application", () => {
   });
 
   it("refuses a signed-in member, whatever email they give, on both routes", async () => {
-    const member = createMember(memberInputSchema.parse({ name: "Signed In", email: "signedin@campus.example", duesPaid: true }), staff.treasurer);
+    const member = await createMember(memberInputSchema.parse({ name: "Signed In", email: "signedin@campus.example", duesPaid: true }), staff.treasurer);
     const session: typeof staff.admin = {
       id: member.id,
       name: member.name,
@@ -310,27 +311,27 @@ describe("starting an online application", () => {
     };
     expect(await rejection(startOnlineApplication(applicant(5), session))).toMatchObject({ code: "already_member", status: 409 });
     const manual = applicationInputSchema.parse({ name: "Other", email: "other@campus.example", paymentMethod: "cash", paymentReference: "Paid Tariq" });
-    expect(thrown(() => submitApplication(manual, null, session)).code).toBe("already_member");
+    expect((await thrown(() => submitApplication(manual, null, session))).code).toBe("already_member");
 
     expect(razorpay.orders).toHaveLength(0);
-    expect(listMembers()).toHaveLength(1);
-    expect(get("SELECT 1 FROM online_applications")).toBeUndefined();
-    expect(get("SELECT 1 FROM membership_applications")).toBeUndefined();
+    expect(await listMembers()).toHaveLength(1);
+    expect(await get("SELECT 1 FROM online_applications")).toBeUndefined();
+    expect(await get("SELECT 1 FROM membership_applications")).toBeUndefined();
     // A visitor and a committee account are unaffected.
     expect((await startOnlineApplication(applicant(6), null)).status).toBe("pending");
-    expect(submitApplication(manual, null, staff.treasurer).status).toBe("pending");
+    expect((await submitApplication(manual, null, staff.treasurer)).status).toBe("pending");
   });
 
   it("says when the password is set, so a finished application stops being shown", async () => {
     const app = await start();
     const done = await confirm(app, razorpay.pay(app.checkout!.orderId));
     expect(done.passwordSet).toBe(false);
-    completeSetup(tokenOf(done.setup!.path), "correct-horse-battery");
+    await completeSetup(tokenOf(done.setup!.path), "correct-horse-battery");
 
     const revisited = await resume(app);
     expect(revisited).toMatchObject({ status: "activated", passwordSet: true, setup: null, canRequestLink: false });
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
     expect(razorpay.orders).toHaveLength(1);
   });
 
@@ -351,10 +352,10 @@ describe("verifying a payment", () => {
     const done = await confirm(app, payment);
 
     expect(done).toMatchObject({ status: "activated", memberNo: "SKY-M-0001", checkout: null, processing: false });
-    const [member] = listMembers();
+    const [member] = await listMembers();
     expect(member).toMatchObject({ email: "applicant1@campus.example", status: "active", duesOwedCents: 0, hasAccount: false });
 
-    const ledger = dues();
+    const ledger = await dues();
     expect(ledger).toHaveLength(1);
     expect(ledger[0]).toMatchObject({
       status: "settled",
@@ -364,7 +365,7 @@ describe("verifying a payment", () => {
     });
     expect(ledger[0].description).toContain(payment.id);
 
-    const [application] = listApplications(staff.treasurer);
+    const [application] = await listApplications(staff.treasurer);
     expect(application).toMatchObject({
       status: "approved",
       channel: "razorpay",
@@ -373,17 +374,17 @@ describe("verifying a payment", () => {
       memberNo: "SKY-M-0001",
       reviewedByName: null,
     });
-    expect(onlineRow(app.id)).toMatchObject({ status: "activated", razorpay_payment_id: payment.id, verified_via: "checkout" });
-    expect(getApplicationStatus(app.code, "applicant1@campus.example")).toMatchObject({ status: "approved", memberNo: "SKY-M-0001" });
+    expect(await onlineRow(app.id)).toMatchObject({ status: "activated", razorpay_payment_id: payment.id, verified_via: "checkout" });
+    expect(await getApplicationStatus(app.code, "applicant1@campus.example")).toMatchObject({ status: "approved", memberNo: "SKY-M-0001" });
 
     // The link belongs to this member, works once, and is stored only as a hash.
     const token = tokenOf(done.setup!.path);
     expect(done.setup).toMatchObject({ memberNo: "SKY-M-0001", email: "applicant1@campus.example" });
-    expect(inspectSetupToken(token).memberNo).toBe("SKY-M-0001");
-    expect(JSON.stringify(all("SELECT * FROM account_setup_tokens"))).not.toContain(token);
-    completeSetup(token, "correct-horse-battery");
-    expect(thrown(() => completeSetup(token, "another-long-password")).code).toBe("invalid_link");
-    expect(login("applicant1@campus.example", "correct-horse-battery").user.role).toBe("member");
+    expect((await inspectSetupToken(token)).memberNo).toBe("SKY-M-0001");
+    expect(JSON.stringify(await all("SELECT * FROM account_setup_tokens"))).not.toContain(token);
+    await completeSetup(token, "correct-horse-battery");
+    expect((await thrown(() => completeSetup(token, "another-long-password"))).code).toBe("invalid_link");
+    expect((await login("applicant1@campus.example", "correct-horse-battery")).user.role).toBe("member");
   });
 
   it("rejects a wrong signature", async () => {
@@ -396,8 +397,8 @@ describe("verifying a payment", () => {
     ]) {
       expect(await rejection(confirm(app, payment, signature))).toMatchObject({ code: "payment_unverified", status: 400 });
     }
-    nothingActivated();
-    expect(onlineRow(app.id).status).toBe("pending");
+    await nothingActivated();
+    expect((await onlineRow(app.id)).status).toBe("pending");
   });
 
   it("does not take a payment ID from the browser as proof", async () => {
@@ -408,7 +409,7 @@ describe("verifying a payment", () => {
     // Correctly signed, but Razorpay has no such payment at all.
     const ghost: GatewayPayment = { ...created, id: "pay_Test9999999999" };
     expect((await rejection(confirm(app, ghost))).code).toBe("payment_provider_unavailable");
-    nothingActivated();
+    await nothingActivated();
   });
 
   it("rejects a payment whose amount or currency differs from the order", async () => {
@@ -417,8 +418,8 @@ describe("verifying a payment", () => {
     expect(await rejection(confirm(app, short))).toMatchObject({ code: "payment_mismatch", status: 409 });
     const dollars = razorpay.pay(app.checkout!.orderId, { currency: "USD" });
     expect(await rejection(confirm(app, dollars))).toMatchObject({ code: "payment_mismatch" });
-    nothingActivated();
-    expect(onlineRow(app.id)).toMatchObject({ status: "pending", razorpay_payment_id: null });
+    await nothingActivated();
+    expect(await onlineRow(app.id)).toMatchObject({ status: "pending", razorpay_payment_id: null });
   });
 
   it("cannot use one payment for a second membership", async () => {
@@ -429,9 +430,9 @@ describe("verifying a payment", () => {
 
     // The second applicant presents the first applicant's payment, signed for their own order.
     expect(await rejection(confirm(second, payment))).toMatchObject({ code: "payment_mismatch" });
-    expect(onlineRow(second.id)).toMatchObject({ status: "pending", razorpay_payment_id: null, member_id: null });
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
+    expect(await onlineRow(second.id)).toMatchObject({ status: "pending", razorpay_payment_id: null, member_id: null });
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
   });
 
   it("captures a payment that Razorpay has only authorised, for the exact amount", async () => {
@@ -439,9 +440,9 @@ describe("verifying a payment", () => {
     const payment = razorpay.pay(app.checkout!.orderId, { status: "authorized", method: "card" });
     expect((await confirm(app, payment)).status).toBe("activated");
     expect(razorpay.captures).toBe(1);
-    expect(dues()[0]).toMatchObject({ status: "settled", method: "card" });
+    expect((await dues())[0]).toMatchObject({ status: "settled", method: "card" });
     // The application row's own list has no "card"; the channel says how it was paid.
-    expect(listApplications(staff.treasurer)[0]).toMatchObject({ paymentMethod: "bank", channel: "razorpay" });
+    expect((await listApplications(staff.treasurer))[0]).toMatchObject({ paymentMethod: "bank", channel: "razorpay" });
   });
 
   it("is safe to confirm twice: one member, one ledger entry, one automatic link", async () => {
@@ -450,9 +451,9 @@ describe("verifying a payment", () => {
     const [a, b] = await Promise.all([confirm(app, payment), confirm(app, payment)]);
     const again = await confirm(app, payment);
 
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
-    expect(all("SELECT 1 FROM membership_applications")).toHaveLength(1);
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
+    expect(await all("SELECT 1 FROM membership_applications")).toHaveLength(1);
     expect([a.setup, b.setup, again.setup].filter(Boolean)).toHaveLength(1);
     expect(again).toMatchObject({ status: "activated", setup: null, canRequestLink: true });
   });
@@ -465,13 +466,13 @@ describe("failed, cancelled and pending payments", () => {
     const afterFailure = await confirm(app, failed);
     expect(afterFailure).toMatchObject({ status: "failed", failureReason: "Payment was declined by the bank", setup: null });
     expect(afterFailure.checkout?.orderId).toBe(app.checkout!.orderId);
-    nothingActivated();
+    await nothingActivated();
 
     const paid = razorpay.pay(app.checkout!.orderId);
     expect((await confirm(app, paid)).status).toBe("activated");
     expect(razorpay.orders).toHaveLength(1);
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
   });
 
   it("treats a closed Checkout window as nothing more than a note", async () => {
@@ -479,14 +480,14 @@ describe("failed, cancelled and pending payments", () => {
     const state = await onlineApplicationAction(app.id, { action: "failed", token: app.accessToken, reason: "Payment window closed" });
     expect(state).toMatchObject({ status: "failed", failureReason: "Payment window closed" });
     expect(state.checkout?.orderId).toBe(app.checkout!.orderId);
-    nothingActivated();
+    await nothingActivated();
   });
 
   it("keeps a payment that is still processing from activating anything", async () => {
     const app = await start();
     razorpay.pay(app.checkout!.orderId, { status: "created" });
     expect(await resume(app)).toMatchObject({ status: "pending", setup: null });
-    nothingActivated();
+    await nothingActivated();
   });
 
   it("does not record a failure reported by a webhook after the payment was captured", async () => {
@@ -494,19 +495,19 @@ describe("failed, cancelled and pending payments", () => {
     const payment = razorpay.pay(app.checkout!.orderId);
     await confirm(app, payment);
     const late = { ...payment, id: "pay_Test0000000777", status: "failed", errorDescription: "late" };
-    expect(webhook("payment.failed", late).outcome).toBe("ignored_already_paid");
-    expect(onlineRow(app.id).status).toBe("activated");
+    expect((await webhook("payment.failed", late)).outcome).toBe("ignored_already_paid");
+    expect((await onlineRow(app.id)).status).toBe("activated");
   });
 
   it("accepts a capture that arrives after a failure", async () => {
     const app = await start();
     const failed = razorpay.pay(app.checkout!.orderId, { status: "failed", errorDescription: "Timed out" });
-    expect(webhook("payment.failed", failed).outcome).toBe("marked_failed");
-    expect(onlineRow(app.id).status).toBe("failed");
-    nothingActivated();
-    expect(webhook("payment.captured", razorpay.pay(app.checkout!.orderId)).outcome).toBe("recorded");
-    expect(onlineRow(app.id).status).toBe("activated");
-    expect(listMembers()).toHaveLength(1);
+    expect((await webhook("payment.failed", failed)).outcome).toBe("marked_failed");
+    expect((await onlineRow(app.id)).status).toBe("failed");
+    await nothingActivated();
+    expect((await webhook("payment.captured", razorpay.pay(app.checkout!.orderId))).outcome).toBe("recorded");
+    expect((await onlineRow(app.id)).status).toBe("activated");
+    expect(await listMembers()).toHaveLength(1);
   });
 });
 
@@ -514,73 +515,73 @@ describe("webhooks", () => {
   it("activates from a signed webhook when the browser never returns", async () => {
     const app = await start();
     const payment = razorpay.pay(app.checkout!.orderId);
-    expect(webhook("payment.captured", payment).outcome).toBe("recorded");
-    expect(onlineRow(app.id)).toMatchObject({ status: "activated", verified_via: "webhook" });
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
+    expect((await webhook("payment.captured", payment)).outcome).toBe("recorded");
+    expect(await onlineRow(app.id)).toMatchObject({ status: "activated", verified_via: "webhook" });
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
     // No link was handed to anyone: the webhook caller is not the applicant.
-    expect(get("SELECT 1 FROM account_setup_tokens")).toBeUndefined();
+    expect(await get("SELECT 1 FROM account_setup_tokens")).toBeUndefined();
   });
 
   it("rejects a bad or missing signature and a body changed after signing", async () => {
     const app = await start();
     const payment = razorpay.pay(app.checkout!.orderId);
-    expect(thrown(() => webhook("payment.captured", payment, { secret: "not-the-secret" }))).toMatchObject({
+    expect(await thrown(() => webhook("payment.captured", payment, { secret: "not-the-secret" }))).toMatchObject({
       code: "bad_signature",
       status: 401,
     });
     const body = Buffer.from(JSON.stringify({ event: "payment.captured", payload: {} }));
-    expect(thrown(() => handleRazorpayWebhook(body, null, "evt_x")).code).toBe("bad_signature");
+    expect((await thrown(() => handleRazorpayWebhook(body, null, "evt_x"))).code).toBe("bad_signature");
     const signature = signWebhook(WEBHOOK_SECRET, body);
     const tampered = Buffer.from(body.toString().replace("captured", "captured "));
-    expect(thrown(() => handleRazorpayWebhook(tampered, signature, "evt_y")).code).toBe("bad_signature");
-    nothingActivated();
-    expect(get("SELECT 1 FROM razorpay_webhook_events")).toBeUndefined();
+    expect((await thrown(() => handleRazorpayWebhook(tampered, signature, "evt_y"))).code).toBe("bad_signature");
+    await nothingActivated();
+    expect(await get("SELECT 1 FROM razorpay_webhook_events")).toBeUndefined();
   });
 
   it("refuses webhooks when no webhook secret is configured", async () => {
     const app = await start();
     delete process.env.SKYLINE_RAZORPAY_WEBHOOK_SECRET;
     const payment = razorpay.pay(app.checkout!.orderId);
-    expect(thrown(() => webhook("payment.captured", payment))).toMatchObject({ code: "payments_not_configured", status: 503 });
-    nothingActivated();
+    expect(await thrown(() => webhook("payment.captured", payment))).toMatchObject({ code: "payments_not_configured", status: 503 });
+    await nothingActivated();
   });
 
   it("handles the same event delivered twice, and two events for one payment", async () => {
     const app = await start();
     const payment = razorpay.pay(app.checkout!.orderId);
-    expect(webhook("payment.captured", payment, { eventId: "evt_same" }).outcome).toBe("recorded");
-    expect(webhook("payment.captured", payment, { eventId: "evt_same" }).outcome).toBe("duplicate");
-    expect(webhook("order.paid", payment, { eventId: "evt_other" }).outcome).toBe("already_recorded");
+    expect((await webhook("payment.captured", payment, { eventId: "evt_same" })).outcome).toBe("recorded");
+    expect((await webhook("payment.captured", payment, { eventId: "evt_same" })).outcome).toBe("duplicate");
+    expect((await webhook("order.paid", payment, { eventId: "evt_other" })).outcome).toBe("already_recorded");
 
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
-    expect(all("SELECT 1 FROM membership_applications")).toHaveLength(1);
-    expect(all("SELECT 1 FROM razorpay_webhook_events")).toHaveLength(2);
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
+    expect(await all("SELECT 1 FROM membership_applications")).toHaveLength(1);
+    expect(await all("SELECT 1 FROM razorpay_webhook_events")).toHaveLength(2);
   });
 
   it("does nothing for a payment whose amount is wrong, an uncaptured one, or an order it does not know", async () => {
     const app = await start();
     const short = razorpay.pay(app.checkout!.orderId, { amountCents: 1 });
-    expect(webhook("payment.captured", short).outcome).toBe("rejected_amount_mismatch");
+    expect((await webhook("payment.captured", short)).outcome).toBe("rejected_amount_mismatch");
     const authorised = razorpay.pay(app.checkout!.orderId, { status: "authorized" });
-    expect(webhook("payment.captured", authorised).outcome).toBe("ignored_not_captured");
+    expect((await webhook("payment.captured", authorised)).outcome).toBe("ignored_not_captured");
     const stranger = razorpay.pay("order_Test0000009999");
-    expect(webhook("payment.captured", stranger).outcome).toBe("ignored_unknown_order");
-    nothingActivated();
-    expect(onlineRow(app.id)).toMatchObject({ status: "pending", razorpay_payment_id: null });
+    expect((await webhook("payment.captured", stranger)).outcome).toBe("ignored_unknown_order");
+    await nothingActivated();
+    expect(await onlineRow(app.id)).toMatchObject({ status: "pending", razorpay_payment_id: null });
   });
 
   it("lets the applicant collect the link when the webhook arrived first", async () => {
     const app = await start();
     const payment = razorpay.pay(app.checkout!.orderId);
-    webhook("payment.captured", payment);
+    await webhook("payment.captured", payment);
 
     const back = await confirm(app, payment);
     expect(back).toMatchObject({ status: "activated", memberNo: "SKY-M-0001" });
     expect(back.setup?.memberNo).toBe("SKY-M-0001");
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
   });
 });
 
@@ -589,18 +590,18 @@ describe("recovery after the browser closes", () => {
     const app = await start();
     razorpay.pay(app.checkout!.orderId); // paid, but the browser closed before confirming
 
-    nothingActivated();
+    await nothingActivated();
     const back = await resume(app);
     expect(back).toMatchObject({ status: "activated", memberNo: "SKY-M-0001" });
     expect(back.setup).not.toBeNull();
-    expect(onlineRow(app.id).verified_via).toBe("lookup");
+    expect((await onlineRow(app.id)).verified_via).toBe("lookup");
 
     // Reloading does not cancel the link the applicant is holding.
     const reloaded = await resume(app);
     expect(reloaded.setup).toBeNull();
-    expect(inspectSetupToken(tokenOf(back.setup!.path)).memberNo).toBe("SKY-M-0001");
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
+    expect((await inspectSetupToken(tokenOf(back.setup!.path))).memberNo).toBe("SKY-M-0001");
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
   });
 
   it("still shows what it knows when Razorpay cannot be reached", async () => {
@@ -615,26 +616,26 @@ describe("recovery after the browser closes", () => {
 
     expect(await rejection(start())).toMatchObject({ code: "already_paid" });
     expect(razorpay.orders).toHaveLength(1);
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
-    expect(onlineRow(app.id).status).toBe("activated");
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
+    expect((await onlineRow(app.id)).status).toBe("activated");
   });
 
   it("replaces an unpaid attempt when the person starts again, and still honours a late payment on it", async () => {
     const first = await start();
     const second = await start();
-    expect(onlineRow(first.id).status).toBe("superseded");
+    expect((await onlineRow(first.id)).status).toBe("superseded");
     expect(second.checkout!.orderId).not.toBe(first.checkout!.orderId);
     expect((await resume(first)).checkout).toBeNull();
 
-    webhook("payment.captured", razorpay.pay(first.checkout!.orderId));
-    expect(onlineRow(first.id).status).toBe("activated");
+    await webhook("payment.captured", razorpay.pay(first.checkout!.orderId));
+    expect((await onlineRow(first.id)).status).toBe("activated");
 
     // Paying the newer order as well cannot create a second member: it is held for a refund.
-    webhook("payment.captured", razorpay.pay(second.checkout!.orderId));
-    expect(onlineRow(second.id).status).toBe("needs_review");
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
+    await webhook("payment.captured", razorpay.pay(second.checkout!.orderId));
+    expect((await onlineRow(second.id)).status).toBe("needs_review");
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
   });
 
   it("gives a replacement link only to the token holder, and only until a password is set", async () => {
@@ -647,9 +648,9 @@ describe("recovery after the browser closes", () => {
     });
     const replaced = await onlineApplicationAction(app.id, { action: "new_link", token: app.accessToken });
     const secondToken = tokenOf(replaced.setup!.path);
-    expect(thrown(() => inspectSetupToken(firstToken)).code).toBe("invalid_link");
+    expect((await thrown(() => inspectSetupToken(firstToken))).code).toBe("invalid_link");
 
-    completeSetup(secondToken, "correct-horse-battery");
+    await completeSetup(secondToken, "correct-horse-battery");
     expect(await rejection(onlineApplicationAction(app.id, { action: "new_link", token: app.accessToken }))).toMatchObject({
       code: "link_unavailable",
     });
@@ -658,9 +659,65 @@ describe("recovery after the browser closes", () => {
 
   it("stops handing out links from the browser once the payment is old", async () => {
     const app = await start();
-    webhook("payment.captured", razorpay.pay(app.checkout!.orderId));
+    await webhook("payment.captured", razorpay.pay(app.checkout!.orderId));
     setClock(() => new Date(Date.now() + 73 * 3_600_000));
     expect(await resume(app)).toMatchObject({ status: "activated", setup: null, canRequestLink: false });
+  });
+});
+
+describe("a payment that Razorpay took but the database could not finish", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps the payment on record without a member, then finishes when the applicant returns", async () => {
+    const app = await start();
+    const payment = razorpay.pay(app.checkout!.orderId);
+
+    // Creating the member keeps failing after the payment has been verified.
+    vi.spyOn(members, "admitMember").mockRejectedValue(new Error("database write failed"));
+    const quiet = console.error;
+    console.error = () => undefined;
+    let stuck;
+    try {
+      stuck = await confirm(app, payment);
+    } finally {
+      console.error = quiet;
+    }
+    // The money is recorded; nothing half-made exists.
+    expect(stuck).toMatchObject({ status: "needs_review", memberNo: null, setup: null });
+    expect(await onlineRow(app.id)).toMatchObject({ status: "needs_review", razorpay_payment_id: payment.id, member_id: null });
+    expect(await listMembers()).toHaveLength(0);
+    expect(await dues()).toHaveLength(0);
+    expect(await get("SELECT 1 FROM membership_applications")).toBeUndefined();
+    expect((await rejection(start())).code).toBe("already_paid"); // no second payment is taken meanwhile
+
+    // The database is back. Coming back finishes it; a repeat webhook then adds nothing.
+    vi.restoreAllMocks();
+    const done = await resume(app);
+    expect(done).toMatchObject({ status: "activated", memberNo: "SKY-M-0001" });
+    expect(done.setup).not.toBeNull();
+    expect((await webhook("payment.captured", payment)).outcome).toBe("already_recorded");
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
+    expect(razorpay.orders).toHaveLength(1);
+  });
+
+  it("can also be finished by a reviewer", async () => {
+    const app = await start();
+    const payment = razorpay.pay(app.checkout!.orderId);
+    vi.spyOn(members, "admitMember").mockRejectedValueOnce(new Error("database write failed"));
+    const quiet = console.error;
+    console.error = () => undefined;
+    try {
+      expect((await webhook("payment.captured", payment)).outcome).toBe("recorded");
+    } finally {
+      console.error = quiet;
+    }
+    expect((await onlineRow(app.id)).status).toBe("needs_review");
+
+    vi.restoreAllMocks();
+    const result = await reconcileOnlinePayment(app.id, { action: "activate" }, staff.treasurer);
+    expect(result.payment).toMatchObject({ status: "activated", memberNo: "SKY-M-0001" });
+    expect(await dues()).toHaveLength(1);
   });
 });
 
@@ -668,7 +725,7 @@ describe("conflicts and reconciliation", () => {
   /** An applicant whose email is added to the member list by hand while they are paying. */
   async function paidButTaken() {
     const app = await start();
-    const existing = createMember(
+    const existing = await createMember(
       memberInputSchema.parse({ name: "Added By Hand", email: "applicant1@campus.example", duesPaid: true }),
       staff.treasurer,
     );
@@ -680,21 +737,21 @@ describe("conflicts and reconciliation", () => {
   it("keeps the payment on record and creates nothing twice when the email is already a member", async () => {
     const { app, payment, state } = await paidButTaken();
     expect(state).toMatchObject({ status: "needs_review", setup: null, memberNo: null, checkout: null });
-    expect(onlineRow(app.id)).toMatchObject({ status: "needs_review", razorpay_payment_id: payment.id, member_id: null });
+    expect(await onlineRow(app.id)).toMatchObject({ status: "needs_review", razorpay_payment_id: payment.id, member_id: null });
 
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1); // the hand-added member's own dues, nothing from Razorpay
-    expect(dues()[0].description).not.toContain(payment.id);
-    expect(all("SELECT 1 FROM membership_applications")).toHaveLength(0);
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1); // the hand-added member's own dues, nothing from Razorpay
+    expect((await dues())[0].description).not.toContain(payment.id);
+    expect(await all("SELECT 1 FROM membership_applications")).toHaveLength(0);
 
-    const [review] = listOnlinePayments(staff.treasurer);
+    const [review] = await listOnlinePayments(staff.treasurer);
     expect(review).toMatchObject({ status: "needs_review", razorpayPaymentId: payment.id, amountCents: SETTINGS.membershipFeeCents });
     expect(review.reviewReason).toContain("already belongs to a member");
 
     // A repeat webhook and a second application change nothing.
-    expect(webhook("payment.captured", payment).outcome).toBe("already_recorded");
+    expect((await webhook("payment.captured", payment)).outcome).toBe("already_recorded");
     expect(await rejection(start())).toMatchObject({ code: "already_member" });
-    expect(listMembers()).toHaveLength(1);
+    expect(await listMembers()).toHaveLength(1);
   });
 
   it("lets a reviewer record a refund, with a note, and only once", async () => {
@@ -705,60 +762,60 @@ describe("conflicts and reconciliation", () => {
     expect(result.payment).toMatchObject({ status: "refunded", resolutionNote: "Refunded in the dashboard", resolvedByName: "Treasurer" });
     expect(result.setup).toBeNull();
     expect((await rejection(reconcileOnlinePayment(app.id, { action: "refunded", note: "again" }, staff.treasurer))).code).toBe("not_in_review");
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
   });
 
   it("lets a reviewer finish the membership once the conflict is gone, without another payment", async () => {
     const { app, existing, payment } = await paidButTaken();
-    updateMember(existing.id, { name: existing.name, email: "someone.else@campus.example", studentId: null, phone: null }, staff.admin);
+    await updateMember(existing.id, { name: existing.name, email: "someone.else@campus.example", studentId: null, phone: null }, staff.admin);
 
     const result = await reconcileOnlinePayment(app.id, { action: "activate" }, staff.treasurer);
     expect(result.payment).toMatchObject({ status: "activated", memberNo: "SKY-M-0002", resolvedByName: "Treasurer" });
     expect(result.setup).toMatchObject({ memberNo: "SKY-M-0002", email: "applicant1@campus.example" });
-    expect(listMembers()).toHaveLength(2);
-    expect(dues().filter((t) => t.description.includes(payment.id))).toHaveLength(1);
+    expect(await listMembers()).toHaveLength(2);
+    expect((await dues()).filter((t) => t.description.includes(payment.id))).toHaveLength(1);
     expect(razorpay.orders).toHaveLength(1);
 
     expect((await rejection(reconcileOnlinePayment(app.id, { action: "activate" }, staff.treasurer))).code).toBe("not_in_review");
-    expect(listMembers()).toHaveLength(2);
+    expect(await listMembers()).toHaveLength(2);
   });
 
   it("lets a reviewer check an unpaid-looking application against Razorpay", async () => {
     const app = await start();
     expect((await rejection(reconcileOnlinePayment(app.id, { action: "check" }, staff.treasurer))).code).toBe("not_paid");
-    nothingActivated();
+    await nothingActivated();
 
     razorpay.pay(app.checkout!.orderId);
     const result = await reconcileOnlinePayment(app.id, { action: "check" }, staff.admin);
     expect(result.payment).toMatchObject({ status: "activated", memberNo: "SKY-M-0001", verifiedVia: "lookup" });
     expect(result.setup?.memberNo).toBe("SKY-M-0001");
     expect((await rejection(reconcileOnlinePayment(app.id, { action: "check" }, staff.admin))).code).toBe("already_paid");
-    expect(listMembers()).toHaveLength(1);
-    expect(dues()).toHaveLength(1);
+    expect(await listMembers()).toHaveLength(1);
+    expect(await dues()).toHaveLength(1);
   });
 
   it("is closed to everyone but the treasurer and president", async () => {
     const app = await start();
     const member: typeof staff.admin = { ...staff.organizer, role: "member" };
     for (const actor of [staff.organizer, member]) {
-      expect(thrown(() => listOnlinePayments(actor)).code).toBe("forbidden");
+      expect((await thrown(() => listOnlinePayments(actor))).code).toBe("forbidden");
       expect((await rejection(reconcileOnlinePayment(app.id, { action: "check" }, actor))).code).toBe("forbidden");
     }
-    expect(thrown(() => listOnlinePayments(null)).code).toBe("unauthorized");
+    expect((await thrown(() => listOnlinePayments(null))).code).toBe("unauthorized");
     expect((await rejection(reconcileOnlinePayment(app.id, { action: "check" }, null))).code).toBe("unauthorized");
   });
 });
 
 describe("the manual route alongside", () => {
   it("still files a pending application that only a reviewer can approve", async () => {
-    const receipt = submitApplication(
+    const receipt = await submitApplication(
       applicationInputSchema.parse({ name: "Cash Payer", email: "cash@campus.example", paymentMethod: "cash", paymentReference: "Paid Tariq" }),
       null,
     );
     expect(receipt.status).toBe("pending");
-    expect(listApplications(staff.treasurer)[0]).toMatchObject({ channel: "manual", status: "pending" });
-    expect(getApplicationStatus(receipt.code, "cash@campus.example")).toMatchObject({ status: "pending", online: null });
-    expect(listMembers()).toHaveLength(0);
+    expect((await listApplications(staff.treasurer))[0]).toMatchObject({ channel: "manual", status: "pending" });
+    expect(await getApplicationStatus(receipt.code, "cash@campus.example")).toMatchObject({ status: "pending", online: null });
+    expect(await listMembers()).toHaveLength(0);
   });
 });

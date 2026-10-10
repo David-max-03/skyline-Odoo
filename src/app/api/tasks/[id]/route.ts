@@ -12,7 +12,7 @@ export const PATCH = staffRoute(null, { body: taskActionSchema }, ({ body, param
   transitionTask(params.id, body.action, user),
 );
 
-export const DELETE = staffRoute(null, {}, ({ params, user }) => {
-  deleteTask(params.id, user);
+export const DELETE = staffRoute(null, {}, async ({ params, user }) => {
+  await deleteTask(params.id, user);
   return { ok: true };
 });

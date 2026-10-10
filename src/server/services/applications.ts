@@ -125,11 +125,11 @@ export async function paymentInstructions(): Promise<PaymentInstructions> {
 const normaliseReference = (method: ApplicationMethod, reference: string) =>
   method === "cash" ? reference.trim() : reference.replace(/\s+/g, "").toUpperCase();
 
-export function submitApplication(
+export async function submitApplication(
   input: ApplicationInput,
   evidence: Buffer | null,
   actor: SessionUser | null = null,
-): ApplicationReceipt {
+): Promise<ApplicationReceipt> {
   // Someone signed in as a member is one already, whatever email they type here.
   if (actor?.role === "member") {
     throw conflict("already_member", "You are already a member. Open My membership to see your details.");
@@ -143,19 +143,19 @@ export function submitApplication(
 
   let fileId = null as string | null;
   try {
-    return tx(() => {
-      if (get("SELECT 1 FROM members WHERE email = ?", input.email)) {
+    return tx(async () => {
+      if (await get("SELECT 1 FROM members WHERE email = ?", input.email)) {
         throw conflict(
           "already_member",
           "This email already belongs to a member. Sign in, or ask the committee for a password link.",
         );
       }
-      if (get("SELECT 1 FROM membership_applications WHERE email = ? AND status = 'pending'", input.email)) {
+      if (await get("SELECT 1 FROM membership_applications WHERE email = ? AND status = 'pending'", input.email)) {
         throw conflict("application_pending", "An application for this email is already waiting for review.");
       }
       if (
         input.paymentMethod !== "cash" &&
-        get(
+        await get(
           `SELECT 1 FROM membership_applications
            WHERE payment_method = ? AND payment_reference = ? AND status <> 'rejected'`,
           input.paymentMethod,
@@ -167,11 +167,11 @@ export function submitApplication(
         });
       }
 
-      fileId = evidence ? storeImage(evidence, "application_payment") : null;
+      fileId = evidence ? await storeImage(evidence, "application_payment") : null;
       let code = `APP-${randomCode(6)}`;
-      while (get("SELECT 1 FROM membership_applications WHERE code = ?", code)) code = `APP-${randomCode(6)}`;
+      while (await get("SELECT 1 FROM membership_applications WHERE code = ?", code)) code = `APP-${randomCode(6)}`;
 
-      run(
+      await run(
         `INSERT INTO membership_applications
            (id, code, name, email, student_id, phone, amount_cents, payment_method, payment_reference,
             evidence_file_id, status, created_at)
@@ -192,7 +192,7 @@ export function submitApplication(
     });
   } catch (error) {
     // The transaction rolled the file's row back; remove its bytes as well.
-    if (fileId) discardFile(fileId);
+    if (fileId) await discardFile(fileId);
     throw error;
   }
 }
@@ -201,15 +201,15 @@ export function submitApplication(
  * Lets an applicant see where their application stands. Both the code and the
  * email must match, and a miss on either gives the same answer.
  */
-export function getApplicationStatus(code: string, email: string): ApplicationStatusView {
-  const row = get<ApplicationRow>(
+export async function getApplicationStatus(code: string, email: string): Promise<ApplicationStatusView> {
+  const row = await get<ApplicationRow>(
     `${SELECT} WHERE a.code = ? AND a.email = ?`,
     code.trim().toUpperCase(),
     email.trim().toLowerCase(),
   );
   if (!row) {
     // An online application has no row here until its payment is verified.
-    const online = get<{ code: string; status: OnlineApplicationStatus; created_at: string }>(
+    const online = await get<{ code: string; status: OnlineApplicationStatus; created_at: string }>(
       "SELECT code, status, created_at FROM online_applications WHERE code = ? AND email = ?",
       code.trim().toUpperCase(),
       email.trim().toLowerCase(),
@@ -236,15 +236,15 @@ export function getApplicationStatus(code: string, email: string): ApplicationSt
 
 // --- reviewing -----------------------------------------------------------------
 
-export function listApplications(actor: SessionUser | null): MembershipApplication[] {
+export async function listApplications(actor: SessionUser | null): Promise<MembershipApplication[]> {
   requireRole(actor, "admin", "treasurer");
-  return all<ApplicationRow>(`${SELECT} ORDER BY (a.status <> 'pending'), a.created_at DESC LIMIT 500`).map(
+  return (await all<ApplicationRow>(`${SELECT} ORDER BY (a.status <> 'pending'), a.created_at DESC LIMIT 500`)).map(
     toApplication,
   );
 }
 
-function loadApplication(id: string): ApplicationRow {
-  const row = get<ApplicationRow>(`${SELECT} WHERE a.id = ?`, id);
+async function loadApplication(id: string): Promise<ApplicationRow> {
+  const row = await get<ApplicationRow>(`${SELECT} WHERE a.id = ?`, id);
   if (!row) throw notFound("Application");
   return row;
 }
@@ -253,21 +253,21 @@ export type ReviewDecision =
   | { action: "approve"; paymentReceived: true }
   | { action: "reject"; reason: string };
 
-export function reviewApplication(
+export async function reviewApplication(
   id: string,
   decision: ReviewDecision,
   actor: SessionUser | null,
-): ApplicationReview {
+): Promise<ApplicationReview> {
   const user = requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    const row = loadApplication(id);
+  return tx(async () => {
+    const row = await loadApplication(id);
     if (row.status !== "pending") {
       throw conflict("already_reviewed", "This application has already been reviewed.");
     }
     const ts = nowIso();
 
     if (decision.action === "reject") {
-      run(
+      await run(
         `UPDATE membership_applications
          SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = ?
          WHERE id = ? AND status = 'pending'`,
@@ -276,7 +276,7 @@ export function reviewApplication(
         ts,
         id,
       );
-      return { application: toApplication(loadApplication(id)), setup: null };
+      return { application: toApplication(await loadApplication(id)), setup: null };
     }
 
     // Checked here as well as in the request schema: approval is the one step
@@ -287,11 +287,11 @@ export function reviewApplication(
       });
     }
 
-    const member = admitMember(
+    const member = await admitMember(
       { name: row.name, email: row.email, studentId: row.student_id, phone: row.phone },
       { method: row.payment_method, reference: row.payment_reference, createdBy: user.id },
     );
-    const updated = run(
+    const updated = await run(
       `UPDATE membership_applications
        SET status = 'approved', reviewed_by = ?, reviewed_at = ?, member_id = ?
        WHERE id = ? AND status = 'pending'`,
@@ -303,7 +303,7 @@ export function reviewApplication(
     if (updated.changes !== 1) {
       throw conflict("already_reviewed", "This application has already been reviewed.");
     }
-    return { application: toApplication(loadApplication(id)), setup: newSetupLink(member.id, user.id) };
+    return { application: toApplication(await loadApplication(id)), setup: await newSetupLink(member.id, user.id) };
   });
 }
 
@@ -313,14 +313,14 @@ export function reviewApplication(
  * Returns an uploaded evidence image to someone allowed to see it. A payment
  * screenshot shows a person's bank details, so only reviewers may open one.
  */
-export function readEvidence(fileId: string, actor: SessionUser | null): StoredFile {
+export async function readEvidence(fileId: string, actor: SessionUser | null): Promise<StoredFile> {
   if (!actor) throw unauthorized();
-  if (get("SELECT 1 FROM membership_applications WHERE evidence_file_id = ?", fileId)) {
+  if (await get("SELECT 1 FROM membership_applications WHERE evidence_file_id = ?", fileId)) {
     requireRole(actor, "admin", "treasurer");
     return openFile(fileId);
   }
   // A receipt photo: the reviewers and the person who filed the claim.
-  const claimAllowed = mayReadClaimEvidence(fileId, actor);
+  const claimAllowed = await mayReadClaimEvidence(fileId, actor);
   if (claimAllowed === true) return openFile(fileId);
   if (claimAllowed === false) throw forbidden("This receipt belongs to someone else's claim.");
   throw notFound("File");

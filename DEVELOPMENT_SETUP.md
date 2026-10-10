@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Node.js 22.5 or newer (built and tested on 24). SQLite is built into Node; there is no
+- Node.js 22.5 or newer (built and tested on 24). SQLite, used locally, is built into Node; there is no
   database to install.
 - npm.
 
@@ -48,8 +48,12 @@ Copy `.env.example` to `.env.local`. Everything is optional in development.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SKYLINE_DB_PATH` | `./data/skyline.db` | Where the SQLite file lives |
-| `SKYLINE_UPLOAD_DIR` | `uploads` beside the database | Where payment screenshots and receipts are stored. Keep it out of any public folder |
+| `DATABASE_URL` | unset | PostgreSQL connection string. When set, Skyline uses PostgreSQL. **Required in production** (see [DEPLOYMENT.md](DEPLOYMENT.md)) |
+| `DATABASE_URL_UNPOOLED` | unset | Direct PostgreSQL connection string for the `db:*` and `admin:create` commands |
+| `SKYLINE_DB_DRIVER` | unset | Forces `sqlite` or `postgres`. Only the e2e script needs it (a production build on a temporary SQLite file) |
+| `SKYLINE_DB_PATH` | `./data/skyline.db` | Where the local SQLite file lives. Local development only |
+| `SKYLINE_UPLOAD_DIR` | `uploads` beside the database | Where uploads are kept when they are on disk (the local default). Keep it out of any public folder |
+| `SKYLINE_UPLOADS` | `disk` on SQLite, `database` on PostgreSQL | Where upload bytes are kept. `disk` is refused on a serverless host |
 | `SKYLINE_UPI_ID` | unset | The club's real UPI ID. When set, the join page shows a payment QR code; when unset, no QR is shown |
 | `SKYLINE_UPI_PAYEE` | organisation name | Payee name encoded in the QR code |
 | `SKYLINE_RAZORPAY_MODE` | unset | Must be exactly `test` to turn online membership payment on. `live` is refused in this version |
@@ -58,7 +62,7 @@ Copy `.env.example` to `.env.local`. Everything is optional in development.
 | `SKYLINE_RAZORPAY_WEBHOOK_SECRET` | unset | The secret set on the Razorpay webhook. Needed only to accept `/api/webhooks/razorpay` |
 | `SKYLINE_DEMO_MODE` | unset | `1` shows the demo sign-ins on `/login` in production |
 | `SKYLINE_AUTO_SEED` | unset | `0` stops development from seeding an empty database |
-| `SKYLINE_DISABLE_RATE_LIMIT` | unset | `1` turns off rate limits (used by the e2e script) |
+| `SKYLINE_DISABLE_RATE_LIMIT` | unset | `1` turns off rate limits (used by the e2e script). Ignored on a serverless host |
 | `NEXT_PUBLIC_CURRENCY` | `INR` | ISO currency code for display |
 | `NEXT_PUBLIC_LOCALE` | `en-IN` | Number and date formatting |
 | `NEXT_PUBLIC_ORG_TZ` | `Asia/Kolkata` | Timezone that decides "today" for due dates and expiry |
@@ -123,23 +127,39 @@ calling the API directly returns 403.
 For camera scanning from a phone, the site must be served over HTTPS (or opened on
 `localhost`). Typing the code always works.
 
-## Deploying
+## Databases: SQLite locally, PostgreSQL in production
 
-Skyline needs a Node host with a persistent disk for the SQLite file: a small VM, or a
-container platform with a mounted volume. It will not keep data on serverless hosts
-with an ephemeral filesystem.
+Local development and `npm test` use a SQLite file and need no setup. Production uses
+PostgreSQL; the same services and SQL run on both.
 
 ```bash
-npm ci && npm run build
-SKYLINE_DB_PATH=/var/lib/skyline/skyline.db npm start
+npm test            # unit and integration tests on a temporary SQLite file
+npm run test:pg     # the same tests on a real, disposable PostgreSQL server
+npm run e2e         # end-to-end check of the production build on SQLite
+npm run e2e:pg      # the same check on the disposable PostgreSQL server
 ```
 
+`test:pg` and `e2e:pg` start PostgreSQL from the `embedded-postgres` dev dependency on a
+free local port with a temporary data folder, apply the migrations to an empty database,
+run, and delete everything afterwards. No Docker, no account, and never a real database.
+If the PostgreSQL binaries fail to start after `npm install`, run
+`node node_modules/@embedded-postgres/<platform>/scripts/hydrate-symlinks.js` once from
+that package's folder (npm may have skipped its install script).
+
+To run the dev server against PostgreSQL, put `DATABASE_URL` in `.env.local`. The demo
+seed and demo sign-ins exist only for local SQLite.
+
+## Deploying
+
+See [DEPLOYMENT.md](DEPLOYMENT.md): creating the PostgreSQL database, applying the
+schema (`npm run db:migrate`), creating the first administrator
+(`npm run admin:create`), Netlify settings, the Razorpay webhook, verification and
+rollback.
+
 - Serve it over HTTPS so the session cookie is marked `Secure` and the camera works.
-- Run one server process (rate limits and the database connection are per process).
-- Back up the database file (and its `-wal` companion) or use `sqlite3 … ".backup"`.
-- Production does not seed itself. `npm run seed` creates the demo accounts with a
-  published password: use it for a demo, not for a real club. Real accounts are created
-  with `createUser` in `src/server/auth.ts`; there is no account-management screen yet.
+- Production never seeds itself and has no default account.
+- `npm run seed` wipes the database and creates demo accounts with a published
+  password. It runs only against a local SQLite file and is refused on PostgreSQL.
 
 ## Troubleshooting
 

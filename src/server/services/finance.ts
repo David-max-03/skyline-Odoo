@@ -104,10 +104,10 @@ export interface NewTransaction {
   createdBy?: string | null;
 }
 
-export function recordTransaction(t: NewTransaction): string {
+export async function recordTransaction(t: NewTransaction): Promise<string> {
   const id = newId("txn");
   const ts = nowIso();
-  run(
+  await run(
     `INSERT INTO transactions
        (id, type, category, amount_cents, status, occurred_on, description, counterparty, method,
         source, event_id, ticket_id, member_id, period_id, order_id, created_by, created_at, settled_at)
@@ -138,9 +138,9 @@ export function recordTransaction(t: NewTransaction): string {
  * Marks one pending row as settled and updates whatever it pays for, so a
  * ticket, order or membership term can never disagree with the ledger.
  */
-function applySettlement(row: TxRow, method: PaymentMethod | null, note: string | null = null): void {
+async function applySettlement(row: TxRow, method: PaymentMethod | null, note: string | null = null): Promise<void> {
   const ts = nowIso();
-  const result = run(
+  const result = await run(
     `UPDATE transactions SET status = 'settled', settled_at = ?, method = COALESCE(?, method),
             description = description || COALESCE(' · ' || ?, '')
      WHERE id = ? AND status = 'pending' AND voided_at IS NULL`,
@@ -153,17 +153,17 @@ function applySettlement(row: TxRow, method: PaymentMethod | null, note: string 
     throw conflict("not_pending", "This entry is not awaiting payment.");
   }
   if (row.source === "ticket" && row.ticket_id) {
-    run("UPDATE tickets SET payment_status = 'paid' WHERE id = ?", row.ticket_id);
+    await run("UPDATE tickets SET payment_status = 'paid' WHERE id = ?", row.ticket_id);
   }
   if (row.source === "order" && row.order_id) {
-    run("UPDATE orders SET payment_status = 'paid' WHERE id = ?", row.order_id);
+    await run("UPDATE orders SET payment_status = 'paid' WHERE id = ?", row.order_id);
   }
   if (row.source === "dues" && row.period_id) {
-    run("UPDATE membership_periods SET paid_at = ? WHERE id = ? AND paid_at IS NULL", ts, row.period_id);
+    await run("UPDATE membership_periods SET paid_at = ? WHERE id = ? AND paid_at IS NULL", ts, row.period_id);
   }
   // Paying the ledger entry of an approved claim is what marks the claim paid,
   // whichever screen the payment was recorded from.
-  run("UPDATE expense_claims SET status = 'paid' WHERE transaction_id = ? AND status = 'approved'", row.id);
+  await run("UPDATE expense_claims SET status = 'paid' WHERE transaction_id = ? AND status = 'approved'", row.id);
 }
 
 type Link = { ticketId: string } | { orderId: string } | { periodId: string };
@@ -178,67 +178,67 @@ function linkClause(link: Link): { column: string; value: string } {
  * Settles the pending income row for a ticket, order or membership term.
  * `note` is appended to the entry's description, e.g. a payment reference.
  */
-export function settlePendingFor(link: Link, method: PaymentMethod | null, note: string | null = null): boolean {
+export async function settlePendingFor(link: Link, method: PaymentMethod | null, note: string | null = null): Promise<boolean> {
   const { column, value } = linkClause(link);
-  return tx(() => {
-    const row = get<TxRow>(
+  return tx(async () => {
+    const row = await get<TxRow>(
       `${SELECT} WHERE t.${column} = ? AND t.type = 'income' AND t.status = 'pending' AND t.voided_at IS NULL`,
       value,
     );
     if (!row) return false;
-    applySettlement(row, method, note);
+    await applySettlement(row, method, note);
     return true;
   });
 }
 
 /** Voids pending income for a cancelled ticket, order or membership term. */
-export function voidPendingFor(link: Link, reason: string): number {
+export async function voidPendingFor(link: Link, reason: string): Promise<number> {
   const { column, value } = linkClause(link);
-  return run(
+  return (await run(
     `UPDATE transactions SET voided_at = ?, void_reason = ?
      WHERE ${column} = ? AND type = 'income' AND status = 'pending' AND voided_at IS NULL`,
     nowIso(),
     reason,
     value,
-  ).changes;
+  )).changes;
 }
 
 // ---------------------------------------------------------------------------
 // Staff operations
 // ---------------------------------------------------------------------------
 
-function assertEventExists(eventId: string | null): void {
-  if (eventId && !get("SELECT 1 FROM events WHERE id = ?", eventId)) {
+async function assertEventExists(eventId: string | null): Promise<void> {
+  if (eventId && !await get("SELECT 1 FROM events WHERE id = ?", eventId)) {
     throw invalid("Choose an existing event.", { eventId: "This event no longer exists" });
   }
 }
 
-export function getTransaction(id: string): Transaction {
-  const row = get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
+export async function getTransaction(id: string): Promise<Transaction> {
+  const row = await get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
   if (!row) throw notFound("Transaction");
   return toTransaction(row);
 }
 
-export function createTransaction(input: TransactionInput, actor: SessionUser | null): Transaction {
+export async function createTransaction(input: TransactionInput, actor: SessionUser | null): Promise<Transaction> {
   // Only finance staff write to the ledger by hand. Everyone else asks to be
   // reimbursed through an expense claim, which needs a receipt photo.
   if (actor && actor.role === "organizer") {
     throw forbidden("File an expense claim with a photo of the receipt; the treasurer records it in the ledger.");
   }
   const user = requireRole(actor, "admin", "treasurer");
-  assertEventExists(input.eventId);
-  const id = recordTransaction({ ...input, source: "manual", createdBy: user.id });
+  await assertEventExists(input.eventId);
+  const id = await recordTransaction({ ...input, source: "manual", createdBy: user.id });
   return getTransaction(id);
 }
 
-export function updateTransaction(
+export async function updateTransaction(
   id: string,
   input: TransactionInput,
   actor: SessionUser | null,
-): Transaction {
+): Promise<Transaction> {
   requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    const row = get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
+  return tx(async () => {
+    const row = await get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
     if (!row) throw notFound("Transaction");
     if (row.voided_at) throw conflict("voided", "A voided entry cannot be edited.");
     if (row.source !== "manual" || row.claim_id) {
@@ -247,10 +247,10 @@ export function updateTransaction(
         "This entry was created by a ticket, order, membership or expense claim and follows that record.",
       );
     }
-    assertEventExists(input.eventId);
+    await assertEventExists(input.eventId);
     const settledAt =
       input.status === "settled" ? (row.settled_at ?? nowIso()) : null;
-    run(
+    await run(
       `UPDATE transactions SET type = ?, category = ?, amount_cents = ?, status = ?, occurred_on = ?,
          description = ?, counterparty = ?, method = ?, event_id = ?, settled_at = ?
        WHERE id = ?`,
@@ -271,25 +271,25 @@ export function updateTransaction(
 }
 
 /** Treasurer confirms that a pending amount was collected or paid out. */
-export function settleTransaction(
+export async function settleTransaction(
   id: string,
   method: PaymentMethod | null,
   actor: SessionUser | null,
-): Transaction {
+): Promise<Transaction> {
   requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    const row = get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
+  return tx(async () => {
+    const row = await get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
     if (!row) throw notFound("Transaction");
     if (row.voided_at) throw conflict("voided", "A voided entry cannot be settled.");
-    applySettlement(row, method);
+    await applySettlement(row, method);
     return getTransaction(id);
   });
 }
 
-export function voidTransaction(id: string, reason: string, actor: SessionUser | null): Transaction {
+export async function voidTransaction(id: string, reason: string, actor: SessionUser | null): Promise<Transaction> {
   requireRole(actor, "admin", "treasurer");
-  return tx(() => {
-    const row = get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
+  return tx(async () => {
+    const row = await get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
     if (!row) throw notFound("Transaction");
     if (row.voided_at) throw conflict("voided", "This entry is already voided.");
     if ((row.source !== "manual" && row.source !== "refund") || row.claim_id) {
@@ -298,7 +298,7 @@ export function voidTransaction(id: string, reason: string, actor: SessionUser |
         "This entry belongs to a ticket, order, membership or expense claim. Change that record instead.",
       );
     }
-    run("UPDATE transactions SET voided_at = ?, void_reason = ? WHERE id = ?", nowIso(), reason, id);
+    await run("UPDATE transactions SET voided_at = ?, void_reason = ? WHERE id = ?", nowIso(), reason, id);
     return getTransaction(id);
   });
 }
@@ -311,7 +311,7 @@ export interface TransactionFilter {
   includeVoided?: boolean;
 }
 
-export function listTransactions(filter: TransactionFilter = {}): Transaction[] {
+export async function listTransactions(filter: TransactionFilter = {}): Promise<Transaction[]> {
   const where: string[] = [];
   const params: (string | null)[] = [];
   if (!filter.includeVoided) where.push("t.voided_at IS NULL");
@@ -327,7 +327,7 @@ export function listTransactions(filter: TransactionFilter = {}): Transaction[] 
   else equals("event_id", filter.eventId);
   const sql = `${SELECT} ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
     ORDER BY t.occurred_on DESC, t.created_at DESC LIMIT 1000`;
-  return all<TxRow>(sql, ...params).map(toTransaction);
+  return (await all<TxRow>(sql, ...params)).map(toTransaction);
 }
 
 /**
@@ -335,18 +335,21 @@ export function listTransactions(filter: TransactionFilter = {}): Transaction[] 
  * (matched by member id, or by their email on the ticket or order) and
  * repayments of their claims. Read-only, and limited to fields about them.
  */
-export function listMemberPayments(memberId: string): MemberPayment[] {
-  return all<TxRow>(
+export async function listMemberPayments(memberId: string): Promise<MemberPayment[]> {
+  return (await all<TxRow>(
     `${SELECT}
      WHERE t.voided_at IS NULL AND (
-       t.member_id = ?1
-       OR t.ticket_id IN (SELECT k.id FROM tickets k JOIN members m ON m.email = k.attendee_email WHERE m.id = ?1)
-       OR t.order_id IN (SELECT o.id FROM orders o JOIN members m ON m.email = o.buyer_email WHERE m.id = ?1)
-       OR c.claimant_member_id = ?1
+       t.member_id = ?
+       OR t.ticket_id IN (SELECT k.id FROM tickets k JOIN members m ON m.email = k.attendee_email WHERE m.id = ?)
+       OR t.order_id IN (SELECT o.id FROM orders o JOIN members m ON m.email = o.buyer_email WHERE m.id = ?)
+       OR c.claimant_member_id = ?
      )
      ORDER BY t.occurred_on DESC, t.created_at DESC LIMIT 200`,
     memberId,
-  ).map((r) => ({
+    memberId,
+    memberId,
+    memberId,
+  )).map((r) => ({
     id: r.id,
     description: r.description,
     type: r.type,
@@ -382,18 +385,19 @@ function finish<T extends FinanceTotals>(f: T): T {
 }
 
 /** Financial result per event, keyed by event id. */
-export function eventFinanceMap(): Map<string, EventFinance> {
-  const rows = all<{
+export async function eventFinanceMap(): Promise<Map<string, EventFinance>> {
+  const rows = await all<{
     event_id: string;
     type: TransactionType;
     status: TransactionStatus;
     is_ticket: number;
     total: number;
   }>(
-    `SELECT event_id, type, status, (source = 'ticket') AS is_ticket, SUM(amount_cents) AS total
+    `SELECT event_id, type, status, CASE WHEN source = 'ticket' THEN 1 ELSE 0 END AS is_ticket,
+            SUM(amount_cents) AS total
      FROM transactions
      WHERE voided_at IS NULL AND event_id IS NOT NULL
-     GROUP BY event_id, type, status, is_ticket`,
+     GROUP BY event_id, type, status, CASE WHEN source = 'ticket' THEN 1 ELSE 0 END`,
   );
   const map = new Map<string, EventFinance>();
   for (const r of rows) {
@@ -413,12 +417,12 @@ export function eventFinanceMap(): Map<string, EventFinance> {
   return map;
 }
 
-export function eventFinance(eventId: string): EventFinance {
-  return eventFinanceMap().get(eventId) ?? emptyEventFinance();
+export async function eventFinance(eventId: string): Promise<EventFinance> {
+  return (await eventFinanceMap()).get(eventId) ?? emptyEventFinance();
 }
 
-export function getFinanceTotals(): FinanceTotals {
-  const rows = all<{ type: TransactionType; status: TransactionStatus; total: number }>(
+export async function getFinanceTotals(): Promise<FinanceTotals> {
+  const rows = await all<{ type: TransactionType; status: TransactionStatus; total: number }>(
     `SELECT type, status, SUM(amount_cents) AS total FROM transactions
      WHERE voided_at IS NULL GROUP BY type, status`,
   );
@@ -439,14 +443,14 @@ export function getFinanceTotals(): FinanceTotals {
   return finish(totals);
 }
 
-export function getMonthlyCashflow(): FinanceSummary["byMonth"] {
-  const rows = all<{ month: string; income: number; expense: number }>(
+export async function getMonthlyCashflow(): Promise<FinanceSummary["byMonth"]> {
+  const rows = await all<{ month: string; income: number; expense: number }>(
     `SELECT substr(occurred_on, 1, 7) AS month,
             SUM(CASE WHEN type = 'income' THEN amount_cents ELSE 0 END) AS income,
             SUM(CASE WHEN type = 'expense' THEN amount_cents ELSE 0 END) AS expense
      FROM transactions
      WHERE voided_at IS NULL AND status = 'settled'
-     GROUP BY month ORDER BY month`,
+     GROUP BY substr(occurred_on, 1, 7) ORDER BY substr(occurred_on, 1, 7)`,
   );
   return rows.map((r) => ({
     month: r.month,
@@ -456,10 +460,10 @@ export function getMonthlyCashflow(): FinanceSummary["byMonth"] {
   }));
 }
 
-export function getFinanceSummary(): FinanceSummary {
-  const totals = getFinanceTotals();
+export async function getFinanceSummary(): Promise<FinanceSummary> {
+  const totals = await getFinanceTotals();
 
-  const categoryRows = all<{
+  const categoryRows = await all<{
     type: TransactionType;
     category: TransactionCategory;
     settled: number;
@@ -471,11 +475,11 @@ export function getFinanceSummary(): FinanceSummary {
             SUM(CASE WHEN status = 'pending' THEN amount_cents ELSE 0 END) AS pending,
             COUNT(*) AS n
      FROM transactions WHERE voided_at IS NULL
-     GROUP BY type, category ORDER BY type DESC, settled + pending DESC`,
+     GROUP BY type, category ORDER BY type DESC, SUM(amount_cents) DESC, category`,
   );
 
-  const perEvent = eventFinanceMap();
-  const titles = all<{ id: string; title: string }>("SELECT id, title FROM events ORDER BY starts_at DESC");
+  const perEvent = await eventFinanceMap();
+  const titles = await all<{ id: string; title: string }>("SELECT id, title FROM events ORDER BY starts_at DESC");
   const byEvent: FinanceSummary["byEvent"] = titles
     .filter((e) => perEvent.has(e.id))
     .map((e) => ({ eventId: e.id, title: e.title, ...perEvent.get(e.id)! }));
@@ -494,7 +498,7 @@ export function getFinanceSummary(): FinanceSummary {
 
   return {
     ...totals,
-    transactionCount: get<{ n: number }>("SELECT COUNT(*) AS n FROM transactions WHERE voided_at IS NULL")!.n,
+    transactionCount: (await get<{ n: number }>("SELECT COUNT(*) AS n FROM transactions WHERE voided_at IS NULL"))!.n,
     byCategory: categoryRows.map((r) => ({
       type: r.type,
       category: r.category,
@@ -502,7 +506,7 @@ export function getFinanceSummary(): FinanceSummary {
       pendingCents: r.pending,
       count: r.n,
     })),
-    byMonth: getMonthlyCashflow(),
+    byMonth: await getMonthlyCashflow(),
     byEvent,
   };
 }

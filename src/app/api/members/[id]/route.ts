@@ -10,8 +10,8 @@ export const PATCH = staffRoute(CAN.manageMembers, { body: memberUpdateSchema },
 );
 
 /** Renew the membership, or collect dues that are owed. */
-export const POST = staffRoute(CAN.manageMembers, { body: memberActionSchema }, ({ body, params, user }) =>
+export const POST = staffRoute(CAN.manageMembers, { body: memberActionSchema }, async ({ body, params, user }) =>
   body.action === "renew"
-    ? renewMember(params.id, { duesPaid: body.duesPaid, method: body.method }, user)
-    : collectDues(params.id, body.method, user),
+    ? await renewMember(params.id, { duesPaid: body.duesPaid, method: body.method }, user)
+    : await collectDues(params.id, body.method, user),
 );

@@ -5,8 +5,8 @@ import { LIMITS, publicRoute } from "@/server/http";
 import { seedIfEmptyInDevelopment } from "@/server/seed";
 
 export const POST = publicRoute({ body: loginSchema, limit: LIMITS.login }, async ({ body, req }) => {
-  seedIfEmptyInDevelopment();
-  const session = login(body.email, body.password);
+  await seedIfEmptyInDevelopment();
+  const session = await login(body.email, body.password);
   const https =
     req.nextUrl.protocol === "https:" || req.headers.get("x-forwarded-proto") === "https";
   (await cookies()).set(SESSION_COOKIE, session.token, {

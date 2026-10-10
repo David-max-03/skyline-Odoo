@@ -40,6 +40,7 @@ password link from the committee member who approved them.
 - [API_CONTRACTS.md](API_CONTRACTS.md) — every endpoint
 - [FRONTEND_HANDOFF.md](FRONTEND_HANDOFF.md) — restyling without touching logic
 - [DEVELOPMENT_SETUP.md](DEVELOPMENT_SETUP.md) — commands, environment, demo script, deployment
+- [DEPLOYMENT.md](DEPLOYMENT.md) — production on Netlify with PostgreSQL: schema, first administrator, webhook, verification, rollback
 
 ## Verify
 
