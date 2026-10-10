@@ -10,5 +10,5 @@ import { MAX_UPLOAD_REQUEST_BYTES, readUpload } from "@/server/storage";
  */
 export const POST = publicRoute(
   { body: applicationInputSchema, form: { maxBytes: MAX_UPLOAD_REQUEST_BYTES }, limit: LIMITS.application },
-  async ({ body, form }) => submitApplication(body, await readUpload(form, "evidence")),
+  async ({ body, form, user }) => submitApplication(body, await readUpload(form, "evidence"), user),
 );

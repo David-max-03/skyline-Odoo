@@ -88,6 +88,10 @@ a payment that was missed. For a deployed server, add a webhook in the dashboard
 `https://<your-host>/api/webhooks/razorpay` with events `payment.captured`, `order.paid` and `payment.failed`, and set
 `SKYLINE_RAZORPAY_WEBHOOK_SECRET` to the secret you chose there.
 
+**Merchandise.** With the same configuration, a signed-in member sees "Pay online" on My orders and on the order
+confirmation. The amount is the order's unpaid total from the database. Committee members can still record a cash payment;
+both routes settle the same ledger entry, so an item cannot be paid twice. The same webhook URL serves both.
+
 **Test payments.** In test mode Razorpay Checkout accepts its documented test cards and the UPI ID `success@razorpay`
 (or `failure@razorpay`). UPI app hand-off on phones and UPI QR codes are live-mode features of Razorpay.
 

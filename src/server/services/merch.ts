@@ -18,6 +18,7 @@ import {
 import { all, get, newId, nowIso, randomCode, run, tx } from "../db";
 import { conflict, invalid, notFound, requireRole } from "../errors";
 import { discardFile, openFile, storeImage, type StoredFile } from "../storage";
+import { payableOnline } from "../razorpay";
 import { recordTransaction, settlePendingFor, voidPendingFor } from "./finance";
 import { findActiveMember } from "./members";
 
@@ -346,15 +347,19 @@ function getOrderRow(id: string): OrderRow {
 function toShopOrder(
   head: { code: string; created_at: string; buyer_name: string; member_id: string | null },
   rows: OrderRow[],
+  /** True when the result goes to the signed-in member the order belongs to. */
+  forOwner = false,
 ): ShopOrder {
   const live = rows.filter((r) => r.status !== "cancelled");
+  const unpaidCents = live.filter((r) => r.payment_status === "pending").reduce((sum, r) => sum + r.total_cents, 0);
   return {
     code: head.code,
     createdAt: head.created_at,
     buyerName: head.buyer_name,
     isMember: head.member_id !== null,
     totalCents: live.reduce((sum, r) => sum + r.total_cents, 0),
-    unpaidCents: live.filter((r) => r.payment_status === "pending").reduce((sum, r) => sum + r.total_cents, 0),
+    unpaidCents,
+    payOnline: forOwner && unpaidCents > 0 && payableOnline(unpaidCents),
     lines: rows.map(toLine),
   };
 }
@@ -377,7 +382,12 @@ interface Buyer {
  * transaction: if any size is short, the stock taken for earlier lines is
  * rolled back with everything else. Call inside `tx`.
  */
-function placeLines(lines: { variantId: string; quantity: number }[], buyer: Buyer): ShopOrder {
+function placeLines(
+  lines: { variantId: string; quantity: number }[],
+  buyer: Buyer,
+  /** The buyer is a signed-in member, who can go on to pay online. */
+  signedIn = false,
+): ShopOrder {
   // The same size listed twice is one line.
   const wanted = new Map<string, number>();
   for (const line of lines) wanted.set(line.variantId, (wanted.get(line.variantId) ?? 0) + line.quantity);
@@ -469,6 +479,7 @@ function placeLines(lines: { variantId: string; quantity: number }[], buyer: Buy
   return toShopOrder(
     { code: checkoutCode, created_at: ts, buyer_name: buyer.name, member_id: buyer.memberId },
     all<OrderRow>(`${ORDER_SELECT} WHERE o.checkout_id = ? ORDER BY o.rowid`, checkoutId),
+    signedIn,
   );
 }
 
@@ -502,7 +513,7 @@ export function checkoutAsMember(items: { variantId: string; quantity: number }[
     );
     if (!member) throw notFound("Member");
     const active = findActiveMember(member.email, member.member_no);
-    return placeLines(items, { name: member.name, email: member.email, memberId: active ? active.id : null });
+    return placeLines(items, { name: member.name, email: member.email, memberId: active ? active.id : null }, true);
   });
 }
 
@@ -560,8 +571,49 @@ export function listMemberOrders(memberId: string): ShopOrder[] {
         member_id: group[0].member_id,
       },
       group,
+      true,
     ),
   );
+}
+
+/**
+ * One of a member's own orders, by its order number, with the lines that are
+ * still owed. Ownership is the same rule as the order history above; an order
+ * that is not theirs is reported as not found, the same as one that does not exist.
+ */
+export function memberOrder(
+  memberId: string,
+  code: string,
+): { order: ShopOrder; owed: { orderId: string; amountCents: number }[] } {
+  const member = get<{ email: string }>("SELECT email FROM members WHERE id = ?", memberId);
+  if (!member) throw notFound("Member");
+  const wanted = code.trim().toUpperCase();
+  const rows = all<OrderRow>(
+    `${ORDER_SELECT}
+     WHERE (c.code = ? OR (o.checkout_id IS NULL AND o.code = ?)) AND (o.member_id = ? OR o.buyer_email = ?)
+     ORDER BY o.rowid`,
+    wanted,
+    wanted,
+    memberId,
+    member.email,
+  );
+  if (rows.length === 0) throw notFound("Order");
+  return {
+    order: toShopOrder(
+      {
+        code: rows[0].checkout_code ?? rows[0].code,
+        created_at: rows[0].created_at,
+        buyer_name: rows[0].buyer_name,
+        member_id: rows[0].member_id,
+      },
+      rows,
+      true,
+    ),
+    // Prices come from the order rows as they were placed, never from the request.
+    owed: rows
+      .filter((r) => r.status !== "cancelled" && r.payment_status === "pending")
+      .map((r) => ({ orderId: r.id, amountCents: r.total_cents })),
+  };
 }
 
 export interface OrderActionResult {

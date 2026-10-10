@@ -947,6 +947,8 @@ export interface OnlineApplicationState {
   setup: SetupLink | null;
   /** Whether the holder may ask for a replacement link (`new_link`). */
   canRequestLink: boolean;
+  /** The member has already set a password, so there is nothing left to do here but sign in. */
+  passwordSet: boolean;
 }
 
 /** Returned once, when the application is started. The token is not stored readably anywhere. */
@@ -1261,8 +1263,66 @@ export interface ShopOrder {
   totalCents: number;
   /** Part of the total not yet collected. */
   unpaidCents: number;
+  /** Whether the signed-in member can pay the unpaid part online right now. Always false for a visitor. */
+  payOnline: boolean;
   lines: OrderLine[];
 }
+
+/**
+ * What a signed-in member may do about paying one of their own orders online.
+ * Nothing here carries an amount: the server works it out from the order.
+ * `confirm` carries what Razorpay Checkout returned, which the server verifies.
+ */
+export const orderPaymentActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("start") }),
+  z.object({
+    action: z.literal("confirm"),
+    razorpayOrderId: z.string().regex(/^order_[A-Za-z0-9]{6,40}$/),
+    razorpayPaymentId: z.string().regex(/^pay_[A-Za-z0-9]{6,40}$/),
+    razorpaySignature: z.string().regex(/^[a-fA-F0-9]{64}$/),
+  }),
+  z.object({ action: z.literal("check") }),
+  z.object({ action: z.literal("failed"), reason: optionalText(200) }),
+]);
+export type OrderPaymentAction = z.infer<typeof orderPaymentActionSchema>;
+
+/** Where an order's online payment stands, as its owner sees it. */
+export interface OrderPaymentState {
+  /** The order as the server now has it. Paid lines here are paid for real. */
+  order: ShopOrder;
+  /** What Razorpay Checkout needs, while there is an open payment to make. */
+  checkout: OnlineCheckout | null;
+  /** A payment exists but Razorpay has not finished it. Nothing is marked paid. */
+  processing: boolean;
+  /** Why the last attempt failed, when it did. */
+  failureReason: string | null;
+}
+
+/** An online merchandise payment as the treasurer and president see it. */
+export interface OrderPaymentRecord {
+  id: string;
+  orderCode: string;
+  memberName: string;
+  memberNo: string;
+  amountCents: number;
+  /** How much of it settled order lines. The difference is owed back to the member. */
+  appliedCents: number | null;
+  status: "pending" | "failed" | "superseded" | "paid" | "needs_review" | "refunded";
+  razorpayOrderId: string;
+  razorpayPaymentId: string | null;
+  paymentMethod: string | null;
+  paidAt: string | null;
+  reviewReason: string | null;
+  resolvedByName: string | null;
+  resolutionNote: string | null;
+  createdAt: string;
+}
+
+/** Record that the part of a payment that was not owed has been returned in the Razorpay dashboard. */
+export const orderPaymentResolveSchema = z.object({
+  action: z.literal("refunded"),
+  note: text(3, 300, "Note"),
+});
 
 export const orderInputSchema = z.object({
   productId: z.string().min(1, "Choose a product"),

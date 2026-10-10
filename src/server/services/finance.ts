@@ -138,13 +138,15 @@ export function recordTransaction(t: NewTransaction): string {
  * Marks one pending row as settled and updates whatever it pays for, so a
  * ticket, order or membership term can never disagree with the ledger.
  */
-function applySettlement(row: TxRow, method: PaymentMethod | null): void {
+function applySettlement(row: TxRow, method: PaymentMethod | null, note: string | null = null): void {
   const ts = nowIso();
   const result = run(
-    `UPDATE transactions SET status = 'settled', settled_at = ?, method = COALESCE(?, method)
+    `UPDATE transactions SET status = 'settled', settled_at = ?, method = COALESCE(?, method),
+            description = description || COALESCE(' · ' || ?, '')
      WHERE id = ? AND status = 'pending' AND voided_at IS NULL`,
     ts,
     method,
+    note,
     row.id,
   );
   if (result.changes !== 1) {
@@ -172,8 +174,11 @@ function linkClause(link: Link): { column: string; value: string } {
   return { column: "period_id", value: link.periodId };
 }
 
-/** Settles the pending income row for a ticket, order or membership term. */
-export function settlePendingFor(link: Link, method: PaymentMethod | null): boolean {
+/**
+ * Settles the pending income row for a ticket, order or membership term.
+ * `note` is appended to the entry's description, e.g. a payment reference.
+ */
+export function settlePendingFor(link: Link, method: PaymentMethod | null, note: string | null = null): boolean {
   const { column, value } = linkClause(link);
   return tx(() => {
     const row = get<TxRow>(
@@ -181,7 +186,7 @@ export function settlePendingFor(link: Link, method: PaymentMethod | null): bool
       value,
     );
     if (!row) return false;
-    applySettlement(row, method);
+    applySettlement(row, method, note);
     return true;
   });
 }

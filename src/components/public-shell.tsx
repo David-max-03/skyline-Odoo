@@ -2,8 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
-import { SETTINGS } from "@/lib/contracts";
+import { createContext, useContext, type ReactNode } from "react";
+import { useApi } from "@/lib/api-client";
+import { SETTINGS, type SessionUser } from "@/lib/contracts";
+import { publicNavLinks } from "@/lib/public-nav";
 import { CartLink } from "./shop-ui";
 import { cn } from "./ui";
 
@@ -38,61 +40,69 @@ export function Logo({
   );
 }
 
-const LINKS = [
-  { href: "/", label: "Home" },
-  { href: "/events", label: "Events" },
-  { href: "/shop", label: "Merchandise" },
-  { href: "/join", label: "Become a member" },
-  { href: "/login", label: "Login" },
-];
+/**
+ * Who is looking at a public page: a signed-in account, `null` for a visitor,
+ * or `undefined` while that is still being worked out. For display only.
+ */
+const VisitorContext = createContext<SessionUser | null | undefined>(undefined);
+export const useVisitor = () => useContext(VisitorContext);
 
 /** Header and footer for the pages students and visitors see. */
 export function PublicShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  // The same session check the member and committee layouts use. A failed check shows the visitor menu.
+  const me = useApi<{ user: SessionUser | null }>("/api/auth/me");
+  const visitor = me.data ? me.data.user : me.error ? null : undefined;
+  const links = publicNavLinks(visitor);
+  const account = links.find((link) => link.href === "/member" || link.href === "/org");
   return (
-    <div className="flex min-h-dvh flex-col">
-      <header className="no-print sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur">
-        <div className="mx-auto flex h-16 max-w-5xl items-center justify-between gap-4 px-4 sm:px-6">
-          <Link href="/" aria-label="Skyline home" className="rounded-control">
-            <Logo compact />
-          </Link>
-          <nav aria-label="Main" className="no-scrollbar flex min-w-0 items-center gap-0.5 overflow-x-auto sm:gap-1">
-            {LINKS.map((link) => {
-              const active = link.href === "/" ? pathname === "/" : pathname === link.href || pathname.startsWith(`${link.href}/`);
-              return (
-                <Link
-                  key={link.href}
-                  href={link.href}
-                  aria-current={active ? "page" : undefined}
-                  className={cn(
-                    "shrink-0 whitespace-nowrap rounded-control px-2.5 py-2 text-sm font-medium transition-colors sm:px-3",
-                    active ? "bg-brand-soft text-brand-deep" : "text-muted hover:bg-sunken hover:text-ink",
-                  )}
-                >
-                  {link.label}
+    <VisitorContext.Provider value={visitor}>
+      <div className="flex min-h-dvh flex-col">
+        <header className="no-print sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur">
+          <div className="mx-auto flex h-16 max-w-5xl items-center justify-between gap-4 px-4 sm:px-6">
+            <Link href="/" aria-label="Skyline home" className="rounded-control">
+              <Logo compact />
+            </Link>
+            <nav aria-label="Main" className="no-scrollbar flex min-w-0 items-center gap-0.5 overflow-x-auto sm:gap-1">
+              {links.map((link) => {
+                const active = link.href === "/" ? pathname === "/" : pathname === link.href || pathname.startsWith(`${link.href}/`);
+                return (
+                  <Link
+                    key={link.href}
+                    href={link.href}
+                    aria-current={active ? "page" : undefined}
+                    className={cn(
+                      "shrink-0 whitespace-nowrap rounded-control px-2.5 py-2 text-sm font-medium transition-colors sm:px-3",
+                      active ? "bg-brand-soft text-brand-deep" : "text-muted hover:bg-sunken hover:text-ink",
+                    )}
+                  >
+                    {link.label}
+                  </Link>
+                );
+              })}
+            </nav>
+            <CartLink />
+          </div>
+        </header>
+        <main id="main" className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
+          {children}
+        </main>
+        <footer className="no-print border-t border-line bg-surface">
+          <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-5 text-[0.8125rem] text-muted sm:px-6">
+            <p>{SETTINGS.orgName}</p>
+            <p className="flex gap-4">
+              <Link href="/news" className="font-medium text-brand hover:underline">
+                News
+              </Link>
+              {visitor !== undefined && (
+                <Link href={account?.href ?? "/login"} className="font-medium text-brand hover:underline">
+                  {account?.label ?? "Sign in"}
                 </Link>
-              );
-            })}
-          </nav>
-          <CartLink />
-        </div>
-      </header>
-      <main id="main" className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
-        {children}
-      </main>
-      <footer className="no-print border-t border-line bg-surface">
-        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-5 text-[0.8125rem] text-muted sm:px-6">
-          <p>{SETTINGS.orgName}</p>
-          <p className="flex gap-4">
-            <Link href="/news" className="font-medium text-brand hover:underline">
-              News
-            </Link>
-            <Link href="/login" className="font-medium text-brand hover:underline">
-              Sign in
-            </Link>
-          </p>
-        </div>
-      </footer>
-    </div>
+              )}
+            </p>
+          </div>
+        </footer>
+      </div>
+    </VisitorContext.Provider>
   );
 }

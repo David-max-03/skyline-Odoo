@@ -27,6 +27,7 @@ import {
   type GatewayPayment,
 } from "../razorpay";
 import { admitMember, newSetupLink } from "./members";
+import { handleOrderPaymentEvent } from "./order-payments";
 
 /**
  * Paying the membership fee online.
@@ -143,6 +144,7 @@ function toState(row: OnlineRow, setup: SetupLink | null, processing = false): O
         : null,
     setup,
     canRequestLink: linkClaimable(row),
+    passwordSet: row.has_account === 1,
   };
 }
 
@@ -410,7 +412,14 @@ function assertCanApply(email: string): void {
 }
 
 /** Step 1: store the application and create its Razorpay order. Creates no member and no ledger entry. */
-export async function startOnlineApplication(input: OnlineApplicationInput): Promise<OnlineApplicationStart> {
+export async function startOnlineApplication(
+  input: OnlineApplicationInput,
+  actor: SessionUser | null = null,
+): Promise<OnlineApplicationStart> {
+  // Someone signed in as a member is one already, whatever email they type here.
+  if (actor?.role === "member") {
+    throw conflict("already_member", "You are already a member. Open My membership to see your details.");
+  }
   requireRazorpay();
   if (!feeIsPayable()) throw new AppError("payments_not_configured", "Online payment is not set up yet.", 503);
   assertCanApply(input.email);
@@ -594,7 +603,8 @@ export function handleRazorpayWebhook(
     } else if (payment && row && type === "payment.failed") {
       result = markFailed(row.id, payment.errorDescription) ? "marked_failed" : "ignored_already_paid";
     } else if (payment && !row) {
-      result = "ignored_unknown_order";
+      // Not a membership order. It may pay for merchandise; otherwise it is not ours.
+      result = handleOrderPaymentEvent(type, payment) ?? "ignored_unknown_order";
     }
 
     run(

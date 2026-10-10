@@ -64,6 +64,7 @@ dates are `YYYY-MM-DD` in the organisation's timezone. The schema is in `src/ser
 | `account_setup_tokens` | One-time password-setup links | Only the SHA-256 is stored; single use; 72-hour expiry; a new link revokes the old one |
 | `membership_applications` | People who say they have paid the fee | One open application per email; a UPI or bank reference can be used once. `channel` is `manual` or `razorpay` |
 | `online_applications` | Membership fees paid through Razorpay | One Razorpay order per row; a payment ID is unique, so it pays for one membership. Becomes a member only after the server verifies the payment (`src/server/services/online-applications.ts`) |
+| `order_payments`, `order_payment_lines` | Online payment attempts for merchandise | One Razorpay order per attempt and one open attempt per checkout; a verified payment settles the same ledger rows staff settle by hand (`src/server/services/order-payments.ts`) |
 | `razorpay_webhook_events` | Webhook deliveries that passed signature verification | Keyed by Razorpay's event ID, so a repeat delivery does nothing |
 | `expense_claims` | Reimbursement requests | Receipt photo required; one linked ledger row at most |
 | `checkouts`, `product_images` | Items bought together; product photos | `orders` rows are the lines of a checkout |

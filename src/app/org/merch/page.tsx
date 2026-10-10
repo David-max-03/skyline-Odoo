@@ -25,6 +25,7 @@ import {
   cn,
 } from "@/components/ui";
 import { api, errorMessage, fieldErrors, useApi } from "@/lib/api-client";
+import { OrderPaymentsPanel } from "@/components/order-payments-panel";
 import { ProductEditor } from "@/components/product-editor";
 import { ProductPhoto } from "@/components/shop-ui";
 import { PRODUCT_CATEGORIES, PRODUCT_CATEGORY_LABELS, SETTINGS, type Order, type Product } from "@/lib/contracts";
@@ -102,6 +103,8 @@ export default function MerchPage() {
           </>
         }
       />
+
+      {canManage && <OrderPaymentsPanel />}
 
       {products.error && !products.data ? (
         <Card>

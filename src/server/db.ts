@@ -535,8 +535,63 @@ CREATE TABLE razorpay_webhook_events (
 );
 `;
 
+/**
+ * Version 7: paying for merchandise online. Two new tables; nothing existing
+ * changes. An order line is still paid by settling its pending ledger entry,
+ * whether staff record cash or Razorpay confirms a payment. These tables only
+ * record the online attempt: which lines it was for, and what became of it.
+ *
+ *   pending       a Razorpay order exists and is unpaid
+ *   failed        the last attempt failed; the same Razorpay order can be paid again
+ *   superseded    replaced because the amount owed changed; a late payment still counts
+ *   paid          verified, and every line it covered was settled by it
+ *   needs_review  verified, but part of it paid for a line that was already paid or cancelled
+ *   refunded      a reviewer returned the part that was not owed
+ */
+const SCHEMA_V7 = `
+CREATE TABLE order_payments (
+  id                  TEXT PRIMARY KEY,
+  member_id           TEXT NOT NULL REFERENCES members(id),
+  -- The checkout code (CHK-…), or the order code for an order placed before checkouts existed.
+  order_code          TEXT NOT NULL,
+  amount_cents        INTEGER NOT NULL CHECK (amount_cents > 0),
+  currency            TEXT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending','failed','superseded','paid','needs_review','refunded')),
+  razorpay_order_id   TEXT NOT NULL UNIQUE,
+  -- A payment is recorded once, for one attempt only.
+  razorpay_payment_id TEXT UNIQUE,
+  payment_method      TEXT,
+  paid_at             TEXT,
+  verified_via        TEXT CHECK (verified_via IN ('checkout','webhook','lookup')),
+  -- How much of the payment settled order lines. The rest is owed back.
+  applied_cents       INTEGER CHECK (applied_cents IS NULL OR applied_cents >= 0),
+  failure_reason      TEXT,
+  failed_at           TEXT,
+  review_reason       TEXT,
+  resolved_by         TEXT REFERENCES users(id),
+  resolved_at         TEXT,
+  resolution_note     TEXT,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  CHECK ((razorpay_payment_id IS NULL) = (paid_at IS NULL)),
+  CHECK ((status IN ('paid','needs_review','refunded')) = (razorpay_payment_id IS NOT NULL))
+);
+-- One open attempt per order, so two clicks cannot start two payments.
+CREATE UNIQUE INDEX order_payments_open ON order_payments(order_code) WHERE status IN ('pending','failed');
+CREATE INDEX order_payments_member ON order_payments(member_id);
+
+-- The lines an attempt was created to pay, with the amount of each at that moment.
+CREATE TABLE order_payment_lines (
+  payment_id   TEXT NOT NULL REFERENCES order_payments(id) ON DELETE CASCADE,
+  order_id     TEXT NOT NULL REFERENCES orders(id),
+  amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+  PRIMARY KEY (payment_id, order_id)
+);
+`;
+
 /** Applied in order; `PRAGMA user_version` records how many have run. */
-const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6];
+const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7];
 
 function migrate(db: DatabaseSync): void {
   const version = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
@@ -559,6 +614,8 @@ function migrate(db: DatabaseSync): void {
 export function wipeAllData(): void {
   tx(() => {
     for (const table of [
+      "order_payment_lines",
+      "order_payments",
       "razorpay_webhook_events",
       "online_applications",
       "expense_claims",

@@ -7,6 +7,6 @@ import { startOnlineApplication } from "@/server/services/online-applications";
  * creates the Razorpay order for the membership fee. The reply carries what
  * Checkout needs and an access token for this browser. Nobody is a member yet.
  */
-export const POST = publicRoute({ body: onlineApplicationInputSchema, limit: LIMITS.onlineStart }, ({ body }) =>
-  startOnlineApplication(body),
+export const POST = publicRoute({ body: onlineApplicationInputSchema, limit: LIMITS.onlineStart }, ({ body, user }) =>
+  startOnlineApplication(body, user),
 );

@@ -789,6 +789,171 @@ async function main(): Promise<void> {
   assert.equal(fakeRazorpay.unauthenticated, 0);
   ok("a reviewer can recover a paid application from Razorpay; other roles cannot see online payments");
 
+  // --- paying for merchandise online --------------------------------------------------
+  console.log("Merchandise payment (Razorpay stand-in, test mode)");
+  const wandaToken: string = wandaBack.data.setup.path.split("/").pop();
+  assert.equal((await anon.post("/api/auth/setup", { token: wandaToken, password: "wanda-e2e-password-1" })).status, 200);
+  const wandaShop = new Client();
+  assert.equal((await wandaShop.post("/api/auth/login", { email: "wanda@e2e.example", password: "wanda-e2e-password-1" })).status, 200);
+  const omarShop = new Client();
+  assert.equal((await omarShop.post("/api/auth/login", { email: "omar@e2e.example", password: "omar-e2e-password-1" })).status, 200);
+
+  const forSale = (await anon.get("/api/public/products")).data.find((p: any) => p.variants.some((v: any) => v.stock >= 3));
+  const sizeForSale = forSale.variants.find((v: any) => v.stock >= 3);
+  const merchOrder = await wandaShop.post("/api/me/checkout", { items: [{ variantId: sizeForSale.id, quantity: 2 }] });
+  assert.equal(merchOrder.status, 200, JSON.stringify(merchOrder.error));
+  assert.equal(merchOrder.data.payOnline, true);
+  assert.ok(merchOrder.data.unpaidCents > 0);
+  const owedCents: number = merchOrder.data.unpaidCents;
+  const payRoute = `/api/me/orders/${merchOrder.data.code}/pay`;
+
+  assert.equal((await anon.post(payRoute, { action: "start" })).status, 401);
+  assert.equal((await treasurer.post(payRoute, { action: "start" })).status, 403);
+  assert.equal((await omarShop.post(payRoute, { action: "start" })).status, 404);
+  assert.equal((await wandaShop.post("/api/me/orders/CHK-NOSUCH/pay", { action: "start" })).status, 404);
+  ok("only the member who owns an order can start paying it; others get 401, 403 or 404");
+
+  const merchOrdersBefore = fakeRazorpay.orders.size;
+  const payStart = await wandaShop.post(payRoute, { action: "start", amount: 1, amountCents: 1, totalCents: 1 });
+  assert.equal(payStart.status, 200, JSON.stringify(payStart.error));
+  assert.equal(payStart.data.checkout.amountCents, owedCents);
+  assert.equal(payStart.data.checkout.currency, "INR");
+  assert.equal(payStart.data.checkout.keyId, RAZORPAY_KEY_ID);
+  assert.equal(fakeRazorpay.orders.get(payStart.data.checkout.orderId)?.amount, owedCents);
+  assert.ok(!JSON.stringify(payStart.data).includes(RAZORPAY_KEY_SECRET));
+  assert.equal((await wandaShop.post(payRoute, { action: "start" })).data.checkout.orderId, payStart.data.checkout.orderId);
+  assert.equal(fakeRazorpay.orders.size, merchOrdersBefore + 1);
+  ok("the Razorpay order is for the order's own total in INR, whatever amount the request claims, and a second click reuses it");
+
+  const merchPayment = fakeRazorpay.pay(payStart.data.checkout.orderId);
+  const merchConfirm = (signature: string, client = wandaShop) =>
+    client.post(payRoute, {
+      action: "confirm",
+      razorpayOrderId: payStart.data.checkout.orderId,
+      razorpayPaymentId: merchPayment.id,
+      razorpaySignature: signature,
+    });
+  const goodSignature = signHex(RAZORPAY_KEY_SECRET, `${payStart.data.checkout.orderId}|${merchPayment.id}`);
+  assert.equal((await merchConfirm("0".repeat(64))).status, 400);
+  assert.equal((await merchConfirm(goodSignature, omarShop)).status, 404);
+  assert.equal((await wandaShop.get("/api/me/orders")).data[0].unpaidCents, owedCents);
+  ok("a forged signature, or another member presenting a real one, marks nothing paid");
+
+  const merchPaid = await merchConfirm(goodSignature);
+  assert.equal(merchPaid.status, 200, JSON.stringify(merchPaid.error));
+  assert.equal(merchPaid.data.order.unpaidCents, 0);
+  assert.equal(merchPaid.data.checkout, null);
+  const wandaOrders = (await wandaShop.get("/api/me/orders")).data;
+  assert.equal(wandaOrders[0].unpaidCents, 0);
+  assert.equal(wandaOrders[0].payOnline, false);
+  assert.deepEqual(wandaOrders[0].lines.map((l: any) => [l.paymentStatus, l.status]), [["paid", "placed"]]);
+  const merchEntries = (await treasurer.get("/api/transactions?category=merchandise")).data.filter((t: any) => t.description.includes(merchPayment.id));
+  assert.equal(merchEntries.length, 1);
+  assert.equal(merchEntries[0].status, "settled");
+  assert.equal(merchEntries[0].amountCents, owedCents);
+  ok("a payment verified with Razorpay marks the order paid and settles its ledger entry");
+
+  assert.equal((await merchConfirm(goodSignature)).data.order.unpaidCents, 0);
+  assert.equal((await deliverWebhook("payment.captured", merchPayment, "evt_e2e_merch_1")).body.data.outcome, "already_recorded");
+  assert.equal((await wandaShop.post(payRoute, { action: "start" })).status, 409);
+  assert.equal((await treasurer.get("/api/transactions?category=merchandise")).data.filter((t: any) => t.description.includes(merchPayment.id)).length, 1);
+  assert.equal(fakeRazorpay.orders.size, merchOrdersBefore + 1);
+  ok("confirming again, a webhook for the same payment, and a second attempt to pay all change nothing");
+
+  const paidLine = (await treasurer.get("/api/orders")).data.find((o: any) => o.checkoutCode === merchOrder.data.code);
+  assert.equal(paidLine.paymentStatus, "paid");
+  assert.equal(paidLine.status, "placed");
+  assert.equal((await treasurer.post(`/api/orders/${paidLine.id}`, { action: "fulfil" })).status, 200);
+  assert.equal((await wandaShop.get("/api/me/orders")).data[0].lines[0].status, "fulfilled");
+  ok("hand-over stays a separate committee step after an online payment");
+
+  // The browser closes after paying: only the webhook tells the server.
+  const secondOrder = await wandaShop.post("/api/me/checkout", { items: [{ variantId: sizeForSale.id, quantity: 1 }] });
+  const secondRoute = `/api/me/orders/${secondOrder.data.code}/pay`;
+  const laterStart = await wandaShop.post(secondRoute, { action: "start" });
+  const secondPayment = fakeRazorpay.pay(laterStart.data.checkout.orderId);
+  assert.equal((await deliverWebhook("payment.captured", secondPayment, "evt_e2e_merch_2", "wrong-secret")).status, 401);
+  assert.equal((await wandaShop.get("/api/me/orders")).data[0].unpaidCents, secondOrder.data.unpaidCents);
+  assert.equal((await deliverWebhook("payment.captured", secondPayment, "evt_e2e_merch_2")).body.data.outcome, "order_paid");
+  assert.equal((await deliverWebhook("payment.captured", secondPayment, "evt_e2e_merch_2")).body.data.outcome, "duplicate");
+  assert.equal((await wandaShop.get("/api/me/orders")).data[0].unpaidCents, 0);
+  assert.equal(await memberCount(), membersBefore + 3);
+  assert.equal((await anon.get("/api/order-payments")).status, 401);
+  assert.equal((await organizer.get("/api/order-payments")).status, 403);
+  assert.equal((await treasurer.get("/api/order-payments")).data.length, 2);
+  ok("a signed webhook pays a merchandise order once, creates no member, and payment records stay with the treasurer and president");
+
+  // --- a session lasts across public and member pages --------------------------------
+  console.log("Session persistence");
+  const loginReply = await fetch(`${BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "omar@e2e.example", password: "omar-e2e-password-1" }),
+  });
+  assert.equal(loginReply.status, 200);
+  const sessionCookie = loginReply.headers.get("set-cookie") ?? "";
+  assert.match(sessionCookie, /^skyline_session=[^;]+;/);
+  assert.match(sessionCookie, /;\s*Path=\/(;|$)/i);
+  assert.match(sessionCookie, /;\s*HttpOnly/i);
+  assert.match(sessionCookie, /;\s*SameSite=lax/i);
+  assert.match(sessionCookie, /;\s*Expires=/i);
+  // Plain HTTP on this machine: a Secure cookie would never be sent back.
+  assert.doesNotMatch(sessionCookie, /;\s*Secure/i);
+  ok("the session cookie is HttpOnly, SameSite=Lax, has an expiry and covers every path");
+
+  const cookiePair = sessionCookie.split(";")[0];
+  const omar = new Client({ Cookie: cookiePair });
+  const whoAmI = async () => (await omar.get("/api/auth/me")).data.user;
+  assert.equal((await whoAmI()).role, "member");
+  // Dashboard, then the public shop, events and join pages and their APIs, then back.
+  for (const pagePath of ["/member", "/shop", "/shop/cart", "/events", "/join", "/", "/member/membership"]) {
+    const visited = await omar.raw(pagePath);
+    assert.equal(visited.status, 200, `${pagePath} should load for a signed-in member`);
+    assert.equal(visited.headers.get("set-cookie"), null, `${pagePath} must not touch the session cookie`);
+    await visited.text();
+  }
+  for (const publicApi of ["/api/public/products", "/api/public/events", "/api/public/membership", "/api/public/announcements"]) {
+    const reply = await fetch(BASE + publicApi, { headers: { Cookie: cookiePair } });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.headers.get("set-cookie"), null, `${publicApi} must not touch the session cookie`);
+  }
+  assert.equal((await whoAmI()).email, "omar@e2e.example");
+  const omarRecord = await omar.get("/api/me");
+  assert.equal(omarRecord.status, 200);
+  assert.equal((await whoAmI()).memberNo, omarRecord.data.memberNo);
+  ok("a member stays signed in across the dashboard, Merchandise, Events and Become a member, and on reload");
+
+  const membersNow = await memberCount();
+  const ordersAtRazorpay = fakeRazorpay.orders.size;
+  const secondStart = await omar.post(onlineRoute, { name: "Omar Again", email: "omar.second@e2e.example" });
+  assert.equal(secondStart.status, 409);
+  assert.equal(secondStart.error?.code, "already_member");
+  const manualAgain = await omar.form("/api/public/applications", { name: "Omar Again", email: "omar.third@e2e.example", paymentMethod: "cash", paymentReference: "Paid Tariq" });
+  assert.equal(manualAgain.status, 409);
+  const omarResume = await anon.post(omarRoute, { action: "resume", token: started.data.accessToken });
+  assert.equal(omarResume.data.status, "activated");
+  assert.equal(omarResume.data.passwordSet, true);
+  assert.equal(omarResume.data.setup, null);
+  assert.equal(omarResume.data.canRequestLink, false);
+  assert.equal(await memberCount(), membersNow);
+  assert.equal(fakeRazorpay.orders.size, ordersAtRazorpay);
+  ok("a signed-in member cannot start another application, and revisiting a finished one creates nothing and offers no link");
+
+  const visitor = new Client();
+  for (const pagePath of ["/shop", "/join", "/events"]) assert.equal((await visitor.raw(pagePath)).status, 200);
+  assert.equal((await visitor.get("/api/public/products")).status, 200);
+  assert.equal((await visitor.get("/api/auth/me")).data.user, null);
+  for (const memberApi of ["/api/me", "/api/me/orders", "/api/me/tasks", "/api/me/payments"]) {
+    assert.equal((await visitor.get(memberApi)).status, 401);
+  }
+  assert.equal((await visitor.raw("/member")).status, 307);
+  ok("a visitor can still browse Merchandise and the membership page; member pages and APIs refuse them");
+
+  assert.equal((await omar.post("/api/auth/logout")).status, 200);
+  assert.equal(await whoAmI(), null);
+  assert.equal((await omar.get("/api/me")).status, 401);
+  ok("only signing out ends the session, and the old cookie then stops working");
+
   // --- cross-site requests ---------------------------------------------------------
   const crossSite = new Client({ Origin: "https://evil.example" });
   await crossSite.signIn("organizer@e2e.example").then(

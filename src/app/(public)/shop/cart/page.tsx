@@ -4,17 +4,25 @@ import Link from "next/link";
 import { CircleCheck, ShoppingCart, Trash2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Money } from "@/components/domain";
+import { PayOrderOnline } from "@/components/order-payment";
 import { ProductPhoto, QuantityStepper } from "@/components/shop-ui";
 import { Badge, Button, Card, EmptyState, FormError, LinkButton, Notice, PageHeader, TextField } from "@/components/ui";
 import { api, errorMessage, fieldErrors, useApi } from "@/lib/api-client";
 import { cart, useCart } from "@/lib/cart";
 import type { PublicProduct, SessionUser, ShopOrder } from "@/lib/contracts";
 
-function Confirmation({ order, isMemberAccount }: { order: ShopOrder; isMemberAccount: boolean }) {
+function Confirmation({ order: placed, isMemberAccount }: { order: ShopOrder; isMemberAccount: boolean }) {
+  // Replaced by the server's version of the order after an online payment, never by a guess.
+  const [order, setOrder] = useState(placed);
+  const paid = order.unpaidCents === 0 && order.totalCents > 0;
   return (
     <Card className="p-5">
-      <Notice tone="ok" icon={CircleCheck} title="Order placed. Your items are reserved.">
-        It is not paid yet. Pay the committee when you collect it; they will mark it paid.
+      <Notice tone="ok" icon={CircleCheck} title={paid ? "Order placed and paid." : "Order placed. Your items are reserved."}>
+        {paid
+          ? "Your payment is confirmed. Collect your items from the committee."
+          : order.payOnline
+            ? "It is not paid yet. Pay online now, or pay the committee when you collect it."
+            : "It is not paid yet. Pay the committee when you collect it; they will mark it paid."}
       </Notice>
       <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-3">
         <div>
@@ -22,7 +30,7 @@ function Confirmation({ order, isMemberAccount }: { order: ShopOrder; isMemberAc
           <dd className="font-mono text-xl font-bold text-ink">{order.code}</dd>
         </div>
         <div>
-          <dt className="text-muted">Total to pay</dt>
+          <dt className="text-muted">{paid ? "Total paid" : "Total to pay"}</dt>
           <dd className="font-display text-xl font-bold text-ink">
             <Money cents={order.totalCents} />
           </dd>
@@ -30,7 +38,7 @@ function Confirmation({ order, isMemberAccount }: { order: ShopOrder; isMemberAc
         <div>
           <dt className="text-muted">Payment</dt>
           <dd className="mt-0.5 flex flex-wrap gap-1.5">
-            <Badge tone="warn">Unpaid</Badge>
+            {paid ? <Badge tone="ok">Paid</Badge> : <Badge tone="warn">Unpaid</Badge>}
             {order.isMember && <Badge tone="ok">Member price</Badge>}
           </dd>
         </div>
@@ -46,6 +54,11 @@ function Confirmation({ order, isMemberAccount }: { order: ShopOrder; isMemberAc
         ))}
       </ul>
       <p className="mt-4 text-sm text-muted">Write the order number down and quote it when you collect.</p>
+      {isMemberAccount && (
+        <div className="mt-5 empty:hidden">
+          <PayOrderOnline order={order} onOrder={setOrder} />
+        </div>
+      )}
       <div className="mt-5 flex flex-wrap gap-2">
         {isMemberAccount && <LinkButton href="/member/orders">See my orders</LinkButton>}
         <LinkButton href="/shop" variant="secondary">

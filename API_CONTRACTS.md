@@ -180,6 +180,9 @@ whose paid term covers today; a mismatch is a `422` on `memberNo`.
 | `POST /api/products/:id/images` | A, T | multipart, file `image` | `Product` |
 | `DELETE /api/products/:id/images/:imageId` | A, T | — | `Product` |
 | `POST /api/products/:id/variants` | A, T | `{ size, stock }` | `Product` |
+| `POST /api/me/orders/:code/pay` | member | `orderPaymentActionSchema`: `start`, `confirm` (Checkout result), `check`, `failed`. No amount is accepted | `OrderPaymentState`. The order is paid only after the server verifies the payment with Razorpay. `404` for an order that is not the member's |
+| `GET /api/order-payments` | A, T | — | `OrderPaymentRecord[]` (online merchandise payments; those needing a refund first) |
+| `POST /api/order-payments/:id` | A, T | `{ action: "refunded", note }` | `OrderPaymentRecord` |
 
 A checkout is all-or-nothing and is priced on the server from the product rows; price,
 total and payment fields sent by a client are dropped by the schema. Every line comes

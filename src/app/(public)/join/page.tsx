@@ -4,6 +4,7 @@ import { Check, Clock, Hourglass, QrCode, Search } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Money } from "@/components/domain";
 import { OnlineJoin } from "@/components/online-join";
+import { useVisitor } from "@/components/public-shell";
 import {
   Badge,
   Button,
@@ -168,6 +169,9 @@ export default function JoinPage() {
   const [working, setWorking] = useState(false);
   const [receipt, setReceipt] = useState<ApplicationReceipt | null>(null);
   const online = instructions.data?.online.available === true;
+  const visitor = useVisitor();
+  // Someone signed in as a member has nothing to apply for. The server refuses it as well.
+  const member = visitor?.role === "member" ? visitor : null;
 
   const set = (key: keyof typeof values) => (e: { target: { value: string } }) =>
     setValues((v) => ({ ...v, [key]: e.target.value }));
@@ -270,7 +274,9 @@ export default function JoinPage() {
         description={
           <>
             Membership costs <Money cents={SETTINGS.membershipFeeCents} /> and runs until 31 December.{" "}
-            {online
+            {member
+              ? ""
+              : online
               ? "Pay online and your membership starts straight away."
               : "Pay the fee, send us the payment details, and the treasurer will confirm it."}
           </>
@@ -278,7 +284,24 @@ export default function JoinPage() {
       />
       <div className="grid gap-6 lg:grid-cols-[1fr_22rem]">
         <div className="space-y-6">
-          {receipt ? (
+          {member ? (
+            <Card className="p-5">
+              <Notice tone="ok" icon={Check} title={`You are already a member (${member.memberNo})`}>
+                You are signed in as {member.name}. There is nothing to pay or apply for here.
+              </Notice>
+              <div className="mt-5 flex flex-wrap gap-3">
+                <LinkButton href="/member/membership">My membership</LinkButton>
+                <LinkButton href="/member" variant="secondary">
+                  Member dashboard
+                </LinkButton>
+              </div>
+            </Card>
+          ) : visitor === undefined ? (
+            // Not known yet whether this is a member; do not offer a form that might then disappear.
+            <Card className="p-5">
+              <Skeleton className="h-40" />
+            </Card>
+          ) : receipt ? (
             <Card className="p-5">
               <Notice tone="warn" icon={Clock} title="Application received. It is not approved yet.">
                 The treasurer will check the club&rsquo;s account for your payment. You are not a member until they approve it.
@@ -343,7 +366,7 @@ export default function JoinPage() {
               ))}
             </ul>
           </Card>
-          <StatusLookup />
+          {!member && <StatusLookup />}
         </div>
       </div>
     </>

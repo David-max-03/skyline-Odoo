@@ -125,7 +125,15 @@ export async function paymentInstructions(): Promise<PaymentInstructions> {
 const normaliseReference = (method: ApplicationMethod, reference: string) =>
   method === "cash" ? reference.trim() : reference.replace(/\s+/g, "").toUpperCase();
 
-export function submitApplication(input: ApplicationInput, evidence: Buffer | null): ApplicationReceipt {
+export function submitApplication(
+  input: ApplicationInput,
+  evidence: Buffer | null,
+  actor: SessionUser | null = null,
+): ApplicationReceipt {
+  // Someone signed in as a member is one already, whatever email they type here.
+  if (actor?.role === "member") {
+    throw conflict("already_member", "You are already a member. Open My membership to see your details.");
+  }
   if (input.paymentMethod !== "cash" && !evidence) {
     throw invalid("Add a screenshot of your payment.", {
       evidence: "Attach a screenshot or photo of the payment confirmation",

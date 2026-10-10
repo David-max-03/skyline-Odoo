@@ -298,6 +298,42 @@ describe("starting an online application", () => {
     expect(razorpay.orders).toHaveLength(0);
   });
 
+  it("refuses a signed-in member, whatever email they give, on both routes", async () => {
+    const member = createMember(memberInputSchema.parse({ name: "Signed In", email: "signedin@campus.example", duesPaid: true }), staff.treasurer);
+    const session: typeof staff.admin = {
+      id: member.id,
+      name: member.name,
+      email: member.email,
+      role: "member",
+      memberId: member.id,
+      memberNo: member.memberNo,
+    };
+    expect(await rejection(startOnlineApplication(applicant(5), session))).toMatchObject({ code: "already_member", status: 409 });
+    const manual = applicationInputSchema.parse({ name: "Other", email: "other@campus.example", paymentMethod: "cash", paymentReference: "Paid Tariq" });
+    expect(thrown(() => submitApplication(manual, null, session)).code).toBe("already_member");
+
+    expect(razorpay.orders).toHaveLength(0);
+    expect(listMembers()).toHaveLength(1);
+    expect(get("SELECT 1 FROM online_applications")).toBeUndefined();
+    expect(get("SELECT 1 FROM membership_applications")).toBeUndefined();
+    // A visitor and a committee account are unaffected.
+    expect((await startOnlineApplication(applicant(6), null)).status).toBe("pending");
+    expect(submitApplication(manual, null, staff.treasurer).status).toBe("pending");
+  });
+
+  it("says when the password is set, so a finished application stops being shown", async () => {
+    const app = await start();
+    const done = await confirm(app, razorpay.pay(app.checkout!.orderId));
+    expect(done.passwordSet).toBe(false);
+    completeSetup(tokenOf(done.setup!.path), "correct-horse-battery");
+
+    const revisited = await resume(app);
+    expect(revisited).toMatchObject({ status: "activated", passwordSet: true, setup: null, canRequestLink: false });
+    expect(listMembers()).toHaveLength(1);
+    expect(dues()).toHaveLength(1);
+    expect(razorpay.orders).toHaveLength(1);
+  });
+
   it("needs the access token for every action", async () => {
     const app = await start();
     const error = await rejection(onlineApplicationAction(app.id, { action: "resume", token: "x".repeat(43) }));

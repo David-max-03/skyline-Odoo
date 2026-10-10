@@ -13,6 +13,7 @@ import {
   type OnlineCheckout,
 } from "@/lib/contracts";
 import { formatDateTime } from "@/lib/dates";
+import { loadCheckout, type CheckoutConstructor, type CheckoutSuccess } from "@/lib/razorpay-checkout";
 
 /**
  * Paying the membership fee online. The browser only opens Razorpay Checkout
@@ -21,38 +22,8 @@ import { formatDateTime } from "@/lib/dates";
  * this page can make anyone a member.
  */
 
-const CHECKOUT_SCRIPT = "https://checkout.razorpay.com/v1/checkout.js";
 /** The application this browser started: its id and access token. Never the password link. */
 const STORAGE_KEY = "skyline.join.online";
-
-interface CheckoutSuccess {
-  razorpay_order_id: string;
-  razorpay_payment_id: string;
-  razorpay_signature: string;
-}
-interface CheckoutInstance {
-  open(): void;
-  on(event: "payment.failed", handler: (response: { error?: { description?: string } }) => void): void;
-}
-type CheckoutConstructor = new (options: Record<string, unknown>) => CheckoutInstance;
-
-let scriptLoading: Promise<void> | null = null;
-function loadCheckout(): Promise<void> {
-  if ((window as unknown as { Razorpay?: CheckoutConstructor }).Razorpay) return Promise.resolve();
-  scriptLoading ??= new Promise<void>((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = CHECKOUT_SCRIPT;
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => {
-      scriptLoading = null;
-      script.remove();
-      reject(new Error("The payment window could not be loaded. Check your connection and try again."));
-    };
-    document.head.appendChild(script);
-  });
-  return scriptLoading;
-}
 
 interface Saved {
   id: string;
@@ -124,7 +95,8 @@ export function OnlineJoin() {
     saved.current = readSaved();
     (async () => {
       try {
-        if (saved.current) await act({ action: "resume" });
+        // A finished application whose password is set has nothing left to show: stop bringing it back.
+        if (saved.current && (await act({ action: "resume" }))?.passwordSet) forget();
       } catch {
         // Shown as the empty form; the applicant can check their status with the code instead.
       } finally {
@@ -134,7 +106,7 @@ export function OnlineJoin() {
     return () => {
       cancelled = true;
     };
-  }, [act]);
+  }, [act, forget]);
 
   async function openCheckout(checkout: OnlineCheckout) {
     setFormError(null);
@@ -303,7 +275,9 @@ export function OnlineJoin() {
           </div>
         ) : (
           <p className="mt-5 text-sm">
-            Sign in with your email or member ID. If you never set a password, ask the committee for a password link.
+            {state.passwordSet
+              ? "Your account is ready. Sign in with your email or member ID."
+              : "Sign in with your email or member ID. If you never set a password, ask the committee for a password link."}
           </p>
         )}
         {code}

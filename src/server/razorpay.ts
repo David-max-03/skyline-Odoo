@@ -75,6 +75,20 @@ export function checkRazorpayConfig(): ConfigCheck {
 
 export const razorpayConfigured = (): boolean => checkRazorpayConfig().ok;
 
+/**
+ * Whether an amount can be taken online right now: Razorpay is configured,
+ * the organisation's currency is rupees, and the amount is at least
+ * Razorpay's minimum of 100 paise.
+ */
+export function payableOnline(amountCents: number): boolean {
+  return (
+    checkRazorpayConfig().ok &&
+    (process.env.NEXT_PUBLIC_CURRENCY ?? "INR") === "INR" &&
+    Number.isInteger(amountCents) &&
+    amountCents >= 100
+  );
+}
+
 const warned = new Set<string>();
 
 /** The configuration, or a 503 that says nothing about what is missing to the public. */
@@ -159,6 +173,17 @@ export function toGatewayPayment(entity: unknown): GatewayPayment | null {
     method: str(e.method),
     errorDescription: str(e.error_description),
   };
+}
+
+/** How a payment differs from the order this server created for it, or null when it matches. */
+export function paymentMismatch(
+  expected: { orderId: string; amountCents: number; currency: string },
+  payment: GatewayPayment,
+): "order" | "amount" | "currency" | null {
+  if (payment.orderId !== expected.orderId) return "order";
+  if (payment.amountCents !== expected.amountCents) return "amount";
+  if (payment.currency !== expected.currency) return "currency";
+  return null;
 }
 
 export interface PaymentGateway {

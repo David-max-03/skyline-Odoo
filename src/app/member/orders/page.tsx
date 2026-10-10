@@ -2,6 +2,7 @@
 
 import { ShoppingBag } from "lucide-react";
 import { Money, OrderStatusBadge } from "@/components/domain";
+import { PayOrderOnline } from "@/components/order-payment";
 import { Badge, Card, EmptyState, ErrorState, LinkButton, LoadingBlock, PageHeader } from "@/components/ui";
 import { useApi } from "@/lib/api-client";
 import type { ShopOrder } from "@/lib/contracts";
@@ -17,7 +18,7 @@ export default function MemberOrdersPage() {
 
   return (
     <>
-      <PageHeader title="My orders" description="Merchandise you have ordered. Payment and hand-over are recorded by the committee." actions={shop} />
+      <PageHeader title="My orders" description="Merchandise you have ordered. Pay online here, or pay the committee when you collect; hand-over is recorded by the committee." actions={shop} />
       {error && !data ? (
         <Card>
           <ErrorState message={error.message} onRetry={reload} />
@@ -72,6 +73,10 @@ export default function MemberOrdersPage() {
                     </li>
                   ))}
                 </ul>
+                {/* The server's answer after a payment replaces what is shown, by reloading the list. */}
+                <div className="border-t border-line px-5 py-3.5 empty:hidden">
+                  <PayOrderOnline order={order} onOrder={reload} />
+                </div>
               </Card>
             </li>
           ))}
