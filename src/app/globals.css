@@ -1,0 +1,217 @@
+@import "tailwindcss";
+
+/*
+ * Skyline design tokens
+ *
+ * Three layers. Change a primitive to retune a colour everywhere; change a
+ * semantic token to re-theme; components only ever use the Tailwind classes
+ * generated from the semantic layer (bg-surface, text-muted, border-line…).
+ * No component file contains a raw hex value.
+ */
+
+:root {
+  /* ---- 1. Primitives ------------------------------------------------- */
+  --ink-950: #0b1220;
+  --ink-900: #111a2e;
+  --ink-800: #1b2740;
+  --ink-700: #2a3a5c;
+
+  --slate-700: #344054;
+  --slate-600: #475467;
+  --slate-500: #667085;
+  --slate-300: #d0d5dd;
+  --slate-200: #e4e7ec;
+  --slate-100: #f2f4f7;
+  --slate-50: #f8f9fb;
+  --white: #ffffff;
+
+  --sky-800: #17419a;
+  --sky-700: #1d4fb8;
+  --sky-600: #2563d9;
+  --sky-200: #bcd3fb;
+  --sky-100: #dde9fd;
+  --sky-50: #eff5ff;
+
+  --dawn-500: #f5a524; /* the sunrise accent; decorative only, never text */
+
+  --green-800: #0a5c2e;
+  --green-700: #0f7a3d;
+  --green-100: #dcf5e6;
+  --amber-900: #7a4a00;
+  --amber-100: #fdefd0;
+  --red-700: #b42318;
+  --red-100: #fde4e1;
+
+  /* ---- 2. Semantic ---------------------------------------------------- */
+  --canvas: var(--slate-50);
+  --surface: var(--white);
+  --sunken: var(--slate-100);
+  --line: var(--slate-200);
+  --line-strong: var(--slate-300);
+
+  --ink: var(--ink-950); /* 18.6:1 on surface */
+  --body: var(--slate-700); /* 10.4:1 */
+  --muted: var(--slate-600); /* 7.6:1 */
+  --subtle: var(--slate-500); /* 4.9:1, the lightest text allowed */
+
+  --brand: var(--sky-600); /* 5.3:1 on surface */
+  --brand-strong: var(--sky-700);
+  --brand-deep: var(--sky-800);
+  --brand-soft: var(--sky-50);
+  --brand-line: var(--sky-200);
+  --on-brand: var(--white);
+
+  --ok: var(--green-700);
+  --ok-strong: var(--green-800);
+  --ok-soft: var(--green-100);
+  --warn: var(--amber-900);
+  --warn-soft: var(--amber-100);
+  --bad: var(--red-700);
+  --bad-soft: var(--red-100);
+
+  --night: var(--ink-950);
+  --night-raised: var(--ink-800);
+  --night-line: var(--ink-700);
+  --on-night: #e7ecf6;
+  --on-night-muted: #a9b5cc;
+  --accent: var(--dawn-500);
+
+  /* Charts: categorical slots validated for colour-blind separation. */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-grid: #e6e8ec;
+  --chart-axis: #7b8494;
+
+  /* ---- 3. Component --------------------------------------------------- */
+  --corner-control: 0.5rem;
+  --corner-card: 0.75rem;
+  --elevation-card: 0 1px 2px rgb(11 18 32 / 0.05);
+  --elevation-raised: 0 12px 32px -8px rgb(11 18 32 / 0.22), 0 2px 6px rgb(11 18 32 / 0.08);
+  --sidebar-width: 15.5rem;
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-body: var(--body);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-deep: var(--brand-deep);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-line: var(--brand-line);
+  --color-on-brand: var(--on-brand);
+  --color-ok: var(--ok);
+  --color-ok-strong: var(--ok-strong);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-night: var(--night);
+  --color-night-raised: var(--night-raised);
+  --color-night-line: var(--night-line);
+  --color-on-night: var(--on-night);
+  --color-on-night-muted: var(--on-night-muted);
+  --color-accent: var(--accent);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-manrope), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --radius-control: var(--corner-control);
+  --radius-card: var(--corner-card);
+  --shadow-card: var(--elevation-card);
+  --shadow-raised: var(--elevation-raised);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    background: var(--canvas);
+    color: var(--body);
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    line-height: 1.55;
+  }
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    color: var(--ink);
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+  /* One focus treatment for every interactive element. */
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  button,
+  [role="button"],
+  summary,
+  select,
+  label[for] {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+  dialog::backdrop {
+    background: rgb(11 18 32 / 0.5);
+  }
+}
+
+@layer utilities {
+  /* Money and counts line up in columns. */
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+  .ticket-qr svg {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-rise {
+  animation: rise 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
+}
