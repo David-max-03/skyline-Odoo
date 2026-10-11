@@ -88,6 +88,17 @@
   --elevation-card: 0 1px 2px rgb(11 18 32 / 0.04), 0 1px 1px rgb(11 18 32 / 0.03);
   --elevation-raised: 0 12px 32px -8px rgb(11 18 32 / 0.22), 0 2px 6px rgb(11 18 32 / 0.08);
   --sidebar-width: 15.5rem;
+
+  /*
+   * Page width. Every shell centres its content in one fluid container:
+   * as wide as the screen up to a cap, with a gutter that grows with the
+   * screen. Pages never set their own outer width; a page that is mostly
+   * reading or one form narrows itself with `.measure` instead.
+   */
+  --page-max: 90rem; /* public and member pages */
+  --page-max-wide: 108rem; /* the committee workspace, beside its sidebar */
+  --page-gutter: clamp(1rem, 0.5rem + 2vw, 2.5rem);
+  --page-space: clamp(1.25rem, 0.9rem + 1.2vw, 2rem); /* top and bottom of a page */
 }
 
 @theme inline {
@@ -265,6 +276,25 @@
   .stack-table td[data-layout="actions"]:not(:has(button, a)) {
     display: none;
   }
+}
+
+/* The one page container. See --page-max above. */
+.page-shell,
+.page-shell-wide {
+  width: 100%;
+  margin-inline: auto;
+  max-width: var(--page-max);
+  padding-inline: var(--page-gutter);
+}
+.page-shell-wide {
+  max-width: var(--page-max-wide);
+}
+/* A comfortable reading or form width inside a wide page. */
+.measure {
+  max-width: 46rem;
+}
+.measure-wide {
+  max-width: 64rem;
 }
 
 /* Scrollable strips (filter rows) keep scrolling but hide the bar. */

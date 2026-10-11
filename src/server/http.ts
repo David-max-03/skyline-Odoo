@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import type { z } from "zod";
-import type { Role, SessionUser } from "@/lib/contracts";
+import { shopperMember, type Role, type SessionUser } from "@/lib/contracts";
 import { SESSION_COOKIE, getSessionUser } from "./auth";
 import { isDatabaseUnavailable } from "./db/types";
 import { AppError, forbidden, unauthorized } from "./errors";
@@ -79,6 +79,32 @@ export function memberRoute<S extends z.ZodType | undefined = undefined>(
       if (!user) throw unauthorized();
       if (user.role !== "member" || !user.memberId) {
         throw forbidden("Sign in with a member account to use this.");
+      }
+    },
+  );
+}
+
+/**
+ * Route for buying merchandise as a member: a signed-in member, or a committee
+ * account that is linked to a member record, acting as that member. A
+ * committee account with no member record is refused; it can still order as a
+ * guest. `ctx.memberId` comes from the session, never from the request.
+ */
+export function shopperRoute<S extends z.ZodType | undefined = undefined>(
+  options: Options<S>,
+  handler: (ctx: MemberContext<BodyOf<S>>) => unknown,
+): RouteHandler {
+  return build(
+    options,
+    (ctx) => handler({ ...ctx, memberId: shopperMember(ctx.user)!.id } as MemberContext<BodyOf<S>>),
+    (user) => {
+      if (!user) throw unauthorized();
+      if (!shopperMember(user)) {
+        throw forbidden(
+          user.role === "member"
+            ? "Sign in with a member account to use this."
+            : "Your committee account is not linked to a member record, so it cannot order or pay as a member.",
+        );
       }
     },
   );
@@ -226,8 +252,23 @@ function assertSameOrigin(req: NextRequest): void {
 // --- rate limiting -----------------------------------------------------------
 // Counted in the database (see rate-limit.ts), so a limit holds across server instances.
 
-function clientAddress(req: NextRequest): string | null {
-  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+/**
+ * The visitor's address, for rate limiting only.
+ *
+ * On Netlify the address is in `x-nf-client-connection-ip`, the one header
+ * Netlify says it sets for this. `X-Forwarded-For` is a list the client can
+ * start with anything it likes, so its first entry is never used: where the
+ * Netlify header is absent (a local server behind a proxy), the last entry is
+ * taken, which is the one written by the proxy nearest this server.
+ *
+ * This is a best effort, not an identity. The sign-in limit per account
+ * (`signIn` in auth.ts) does not depend on it.
+ */
+export function clientAddress(req: { headers: { get(name: string): string | null } }): string | null {
+  const netlify = req.headers.get("x-nf-client-connection-ip")?.trim();
+  if (netlify) return netlify;
+  const forwarded = req.headers.get("x-forwarded-for")?.split(",").map((part) => part.trim()).filter(Boolean) ?? [];
+  return forwarded.at(-1) ?? null;
 }
 
 export const LIMITS = {

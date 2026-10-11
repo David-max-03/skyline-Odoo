@@ -4,7 +4,8 @@ import { addDays } from "@/lib/dates";
 import { completeSetup, createSetupToken, login } from "@/server/auth";
 import { all, today } from "@/server/db";
 import { readEvidence } from "@/server/services/applications";
-import { claimAccess, listClaims, reviewClaim, submitClaim } from "@/server/services/claims";
+import { setCommitteeAccountStatus } from "@/server/admin-setup";
+import { claimAccess, listClaimants, listClaims, reviewClaim, submitClaim } from "@/server/services/claims";
 import { getFinanceTotals, listTransactions, settleTransaction, updateTransaction, voidTransaction } from "@/server/services/finance";
 import { createMember } from "@/server/services/members";
 import { createTask } from "@/server/services/tasks";
@@ -32,7 +33,7 @@ const claim = (overrides: Record<string, unknown> = {}) =>
 async function memberAccount(n: number, volunteer = true): Promise<SessionUser> {
   const member = await createMember(
     memberInputSchema.parse({ name: `Member ${n}`, email: `member${n}@campus.example`, duesPaid: true }),
-    staff.treasurer,
+    staff.admin,
   );
   await completeSetup((await createSetupToken(member.id, staff.admin.id)).token, "a-long-test-password");
   if (volunteer) await createTask(taskInputSchema.parse({ title: "Decorate the hall", assigneeMemberId: member.id }), staff.organizer);
@@ -203,5 +204,122 @@ describe("reviewing a claim", () => {
     expect(await expenses()).toHaveLength(0);
     expect((await appError(() => reviewClaim(filed.id, { action: "approve", note: null }, staff.admin))).code).toBe("invalid_claim_status");
     expect((await appError(() => reviewClaim(filed.id, { action: "pay", method: "cash" }, staff.admin))).code).toBe("not_approved");
+  });
+});
+
+describe("the president filing a claim for someone else", () => {
+  const forStaff = (id: string, overrides: Record<string, unknown> = {}) => claim({ claimantKind: "staff", claimantId: id, ...overrides });
+  const forMember = (id: string) => claim({ claimantKind: "member", claimantId: id });
+  const row = async (id: string) =>
+    (await all<{ claimant_user_id: string | null; claimant_member_id: string | null; claimant_name: string; filed_by: string | null }>(
+      "SELECT claimant_user_id, claimant_member_id, claimant_name, filed_by FROM expense_claims WHERE id = ?",
+      id,
+    ))[0];
+
+  it("records the chosen committee member as the claimant and the president as the one who filed it", async () => {
+    const filed = await submitClaim(forStaff(staff.organizer.id), PNG, staff.admin);
+    expect(filed).toMatchObject({ claimantName: "Organizer", claimantKind: "staff", isMine: false, filedByName: "Admin", filedByMe: true, status: "submitted" });
+    expect(await row(filed.id)).toEqual({ claimant_user_id: staff.organizer.id, claimant_member_id: null, claimant_name: "Organizer", filed_by: staff.admin.id });
+
+    // The claimant sees it as their own claim, with who entered it; nobody else's list changes.
+    const theirs = (await listClaims(staff.organizer)).claims;
+    expect(theirs).toHaveLength(1);
+    expect(theirs[0]).toMatchObject({ id: filed.id, isMine: true, filedByName: "Admin", filedByMe: false });
+    expect((await readEvidence(filed.evidenceFileId, staff.organizer)).mime).toBe("image/png");
+  });
+
+  it("records a volunteer as the claimant, by their member record", async () => {
+    const volunteer = await memberAccount(1);
+    const filed = await submitClaim(forMember(volunteer.memberId!), PNG, staff.admin);
+    expect(filed).toMatchObject({ claimantName: "Member 1", claimantKind: "member", filedByName: "Admin", filedByMe: true });
+    expect(await row(filed.id)).toEqual({ claimant_user_id: null, claimant_member_id: volunteer.memberId, claimant_name: "Member 1", filed_by: staff.admin.id });
+    expect((await listClaims(volunteer)).claims.map((c) => [c.id, c.isMine])).toEqual([[filed.id, true]]);
+  });
+
+  it("is for the president only: every other role is refused, and nothing is stored", async () => {
+    const volunteer = await memberAccount(1);
+    const before = await uploads();
+    for (const actor of [staff.treasurer, staff.organizer, volunteer]) {
+      expect((await appError(() => submitClaim(forStaff(staff.admin.id), PNG, actor))).status).toBe(403);
+      expect((await appError(() => submitClaim(forMember(volunteer.memberId!), PNG, actor))).status).toBe(403);
+      // Half a choice is refused the same way, not quietly treated as their own claim.
+      expect((await appError(() => submitClaim(claim({ claimantId: staff.admin.id }), PNG, actor))).status).toBe(403);
+      expect((await appError(() => listClaimants(actor))).status).toBe(403);
+      expect((await claimAccess(actor)).canFileForOthers).toBe(false);
+    }
+    expect((await appError(() => submitClaim(forStaff(staff.organizer.id), PNG, null))).status).toBe(401);
+    expect((await appError(() => listClaimants(null))).status).toBe(401);
+    expect(await all("SELECT id FROM expense_claims")).toEqual([]);
+    expect(await uploads()).toEqual(before);
+    expect((await claimAccess(staff.admin)).canFileForOthers).toBe(true);
+  });
+
+  it("checks the chosen person on the server: they must exist and be allowed to claim", async () => {
+    const volunteer = await memberAccount(1);
+    const notVolunteer = await memberAccount(2, false);
+    const refusals = [
+      forStaff("usr_missing"),
+      forMember("mem_missing"),
+      forMember(notVolunteer.memberId!), // a member who is not a volunteer
+      forStaff(volunteer.memberId!), // a member id passed off as a committee account
+      forMember(staff.organizer.id), // a committee id passed off as a member
+      forStaff(staff.admin.id), // themselves
+      claim({ claimantKind: "staff" }), // no person
+      claim({ claimantId: staff.organizer.id }), // no kind
+    ];
+    for (const input of refusals) {
+      const refused = await appError(() => submitClaim(input, PNG, staff.admin));
+      expect(refused.status).toBe(422);
+      expect(refused.fields?.claimantId).toBeTruthy();
+    }
+    // A disabled committee account cannot be claimed for.
+    await setCommitteeAccountStatus(staff.organizer.id, "disable", staff.admin);
+    expect((await appError(() => submitClaim(forStaff(staff.organizer.id), PNG, staff.admin))).status).toBe(422);
+    // Unknown kinds never reach the service.
+    expect(claimInputSchema.safeParse({ ...claim(), amountCents: "45000", claimantKind: "admin", claimantId: "x" }).success).toBe(false);
+
+    expect(await all("SELECT id FROM expense_claims")).toEqual([]);
+    expect(await uploads()).toEqual([]);
+  });
+
+  it("takes the claimant's name from their record, whatever else the request carries", async () => {
+    const input = { ...forStaff(staff.organizer.id), claimantName: "Somebody Else", filedBy: "usr_forged", status: "paid" } as ReturnType<typeof claim>;
+    const filed = await submitClaim(input, PNG, staff.admin);
+    expect(await row(filed.id)).toMatchObject({ claimant_name: "Organizer", filed_by: staff.admin.id });
+    expect(filed.status).toBe("submitted");
+  });
+
+  it("offers the president active committee members other than themselves, and members who volunteer", async () => {
+    const volunteer = await memberAccount(1);
+    await memberAccount(2, false);
+    await setCommitteeAccountStatus(staff.organizer.id, "disable", staff.admin);
+    expect(await listClaimants(staff.admin)).toEqual([
+      { kind: "staff", id: staff.treasurer.id, name: "Treasurer", detail: "Treasurer" },
+      { kind: "member", id: volunteer.memberId, name: "Member 1", detail: volunteer.memberNo },
+    ]);
+  });
+
+  it("then goes through the usual review: the treasurer approves and pays, and the president who filed it does not", async () => {
+    const filed = await submitClaim(forStaff(staff.organizer.id), PNG, staff.admin);
+    const approve = claimReviewSchema.parse({ action: "approve", note: null });
+    expect((await appError(() => reviewClaim(filed.id, approve, staff.admin))).status).toBe(403);
+    expect((await appError(() => reviewClaim(filed.id, approve, staff.organizer))).status).toBe(403);
+    expect(await expenses()).toHaveLength(0);
+
+    const approved = await reviewClaim(filed.id, approve, staff.treasurer);
+    expect(approved.status).toBe("approved");
+    const [entry] = await expenses();
+    expect(entry).toMatchObject({ amountCents: 45000, status: "pending", counterparty: "Organizer" });
+    expect((await reviewClaim(filed.id, { action: "pay", method: "upi" }, staff.treasurer)).status).toBe("paid");
+    expect((await expenses())[0].status).toBe("settled");
+  });
+
+  it("leaves a claim someone files for themselves exactly as before", async () => {
+    const own = await submitClaim(claim(), PNG, staff.admin);
+    expect(own).toMatchObject({ claimantName: "Admin", isMine: true, filedByName: null, filedByMe: false });
+    expect(await row(own.id)).toEqual({ claimant_user_id: staff.admin.id, claimant_member_id: null, claimant_name: "Admin", filed_by: null });
+    const volunteer = await memberAccount(1);
+    const theirs = await submitClaim(claim(), PNG, volunteer);
+    expect(await row(theirs.id)).toMatchObject({ claimant_member_id: volunteer.memberId, filed_by: null });
   });
 });

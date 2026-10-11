@@ -9,7 +9,8 @@ import { AppError } from "./errors";
  * serverless host each instance would have its own, and a limit of ten would
  * really be ten per instance.)
  *
- * Fixed window per bucket and client. The client is the forwarded address,
+ * Fixed window per bucket and client. The client is the visitor's address
+ * (or, for the per-account sign-in limit, the email or member ID typed),
  * stored only as a hash. One atomic statement counts the request and reports
  * the total, so two simultaneous requests cannot both be "the tenth".
  */
@@ -52,6 +53,28 @@ export async function enforceRateLimit(limit: RateLimit, clientAddress: string |
   }
 
   if ((row?.count ?? 1) > limit.max) {
-    throw new AppError("rate_limited", "Too many attempts. Wait a minute and try again.", 429);
+    const minutes = Math.ceil(limit.windowMs / 60_000);
+    throw new AppError(
+      "rate_limited",
+      minutes <= 1 ? "Too many attempts. Wait a minute and try again." : `Too many attempts. Try again in ${minutes} minutes.`,
+      429,
+    );
   }
+}
+
+/**
+ * Sign-in attempts allowed for one email or member ID, whatever address they
+ * come from. This is what slows guessing one account's password from many
+ * addresses, which the per-address limit cannot.
+ *
+ * - It counts every attempt for the identifier as typed, whether or not an
+ *   account with it exists, and answers the same way for both: it reveals
+ *   nothing about which emails are accounts.
+ * - It is a fixed window, so it always lifts by itself after 15 minutes.
+ *   Nobody is locked out for good, and nothing is written to the account.
+ */
+export const SIGN_IN_ACCOUNT_LIMIT: RateLimit = { name: "login-account", max: 10, windowMs: 15 * 60_000 };
+
+export function enforceSignInAccountLimit(identifier: string): Promise<void> {
+  return enforceRateLimit(SIGN_IN_ACCOUNT_LIMIT, `account:${identifier.trim().toLowerCase()}`);
 }

@@ -149,7 +149,7 @@ export default function ShopPage() {
             <ErrorState message={error.message} onRetry={reload} />
           </Card>
         ) : !data ? (
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4" role="status" aria-label="Loading products">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-[repeat(auto-fill,minmax(14rem,1fr))]" role="status" aria-label="Loading products">
             {[0, 1, 2, 3].map((i) => (
               <Skeleton key={i} className="aspect-[3/5]" />
             ))}
@@ -182,7 +182,7 @@ export default function ShopPage() {
             <p className="mb-3 text-sm text-muted" aria-live="polite">
               {visible.length} {visible.length === 1 ? "product" : "products"}
             </p>
-            <ul className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-4">
+            <ul className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-[repeat(auto-fill,minmax(14rem,1fr))]">
               {visible.map((p) => (
                 <ProductCard key={p.id} product={p} />
               ))}

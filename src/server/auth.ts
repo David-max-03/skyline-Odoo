@@ -1,7 +1,8 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { MEMBER_PASSWORD_MIN, type Role, type SessionUser, type SetupTokenInfo } from "@/lib/contracts";
+import { MEMBER_PASSWORD_MIN, PASSWORD_MIN, type Role, type SessionUser, type SetupTokenInfo } from "@/lib/contracts";
 import { get, newId, now, nowIso, run, tx } from "./db";
 import { AppError, conflict, invalid, notFound } from "./errors";
+import { enforceSignInAccountLimit } from "./rate-limit";
 
 /**
  * Password hashing, server-side sessions and password-setup links.
@@ -52,7 +53,12 @@ interface UserRow {
   role: Role;
   password_hash: string;
   disabled_at: string | null;
+  member_id: string | null;
+  linked_member_no: string | null;
 }
+
+/** A committee account with the number of the member it is linked to, if any. */
+const STAFF_SELECT = "SELECT u.*, lm.member_no AS linked_member_no FROM users u LEFT JOIN members lm ON lm.id = u.member_id";
 
 interface MemberAccountRow {
   id: string;
@@ -69,6 +75,9 @@ const toSessionUser = (row: UserRow): SessionUser => ({
   role: row.role,
   memberId: null,
   memberNo: null,
+  // Only when the linked member still exists.
+  linkedMemberId: row.linked_member_no ? row.member_id : null,
+  linkedMemberNo: row.linked_member_no,
 });
 
 const toMemberSession = (row: Omit<MemberAccountRow, "password_hash">): SessionUser => ({
@@ -87,8 +96,8 @@ export async function createUser(input: {
   password: string;
 }): Promise<SessionUser> {
   const email = input.email.trim().toLowerCase();
-  if (input.password.length < 8) {
-    throw new AppError("weak_password", "Password must be at least 8 characters.", 422);
+  if (input.password.length < PASSWORD_MIN) {
+    throw new AppError("weak_password", `Password must be at least ${PASSWORD_MIN} characters.`, 422);
   }
   const id = newId("usr");
   const passwordHash = hashPassword(input.password);
@@ -133,7 +142,7 @@ export async function login(identifier: string, password: string): Promise<Login
 
   const staff = byMemberNo
     ? undefined
-    : await get<UserRow>("SELECT * FROM users WHERE email = ?", id.toLowerCase());
+    : await get<UserRow>(`${STAFF_SELECT} WHERE u.email = ?`, id.toLowerCase());
   const member = await get<MemberAccountRow>(
     `SELECT m.id, m.member_no, m.name, m.email, a.password_hash
      FROM member_accounts a JOIN members m ON m.id = a.member_id
@@ -178,6 +187,16 @@ export async function login(identifier: string, password: string): Promise<Login
   return { user: toMemberSession(member!), token, expiresAt };
 }
 
+/**
+ * What the sign-in route calls: the per-account attempt limit, then `login`.
+ * The limit is checked before the password, for known and unknown identifiers
+ * alike, so being limited says nothing about whether the account exists.
+ */
+export async function signIn(identifier: string, password: string): Promise<LoginResult> {
+  await enforceSignInAccountLimit(identifier);
+  return login(identifier, password);
+}
+
 export async function getSessionUser(token: string | null | undefined): Promise<SessionUser | null> {
   if (!token) return null;
   if (token.startsWith(MEMBER_TOKEN_PREFIX)) {
@@ -195,7 +214,8 @@ export async function getSessionUser(token: string | null | undefined): Promise<
   }
   const row = await get<UserRow>(
     // Disabling an account deletes its sessions; the check here holds even if one were left behind.
-    `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+    `SELECT u.*, lm.member_no AS linked_member_no
+     FROM sessions s JOIN users u ON u.id = s.user_id LEFT JOIN members lm ON lm.id = u.member_id
      WHERE s.token_hash = ? AND s.expires_at > ? AND u.disabled_at IS NULL`,
     hashToken(token),
     nowIso(),

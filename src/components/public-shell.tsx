@@ -68,12 +68,12 @@ export function PublicShell({ children }: { children: ReactNode }) {
   // The way in (or back to one's own area) sits beside the cart, outside the row of
   // links that scrolls on a narrow screen, so it can never be scrolled out of view.
   const entry = links.find((link) => ENTRY_HREFS.includes(link.href));
-  const EntryIcon = entry?.href === "/org" ? LayoutDashboard : entry?.href === "/member" ? UserRound : LogIn;
+  const EntryIcon = entry?.href === "/login" ? LogIn : entry?.label === "Committee" ? LayoutDashboard : UserRound;
   return (
     <VisitorContext.Provider value={visitor}>
       <div className="flex min-h-dvh flex-col">
         <header className="no-print sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur">
-          <div className="mx-auto flex h-16 max-w-5xl items-center justify-between gap-4 px-4 sm:px-6">
+          <div className="page-shell flex h-16 items-center justify-between gap-4">
             <Link href="/" aria-label="Skyline home" className="rounded-control">
               <Logo compact />
             </Link>
@@ -106,11 +106,11 @@ export function PublicShell({ children }: { children: ReactNode }) {
             </div>
           </div>
         </header>
-        <main id="main" className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
+        <main id="main" className="page-shell flex-1 py-(--page-space)">
           {children}
         </main>
         <footer className="no-print border-t border-line bg-surface">
-          <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-5 text-[0.8125rem] text-muted sm:px-6">
+          <div className="page-shell flex flex-wrap items-center justify-between gap-3 py-5 text-[0.8125rem] text-muted">
             <p>{SETTINGS.orgName}</p>
             <p className="flex gap-4">
               <Link href="/news" className="font-medium text-brand hover:underline">

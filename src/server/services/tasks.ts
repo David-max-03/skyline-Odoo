@@ -1,4 +1,5 @@
 import {
+  CAN,
   TASK_STATUS_LABELS,
   type SessionUser,
   type Task,
@@ -104,7 +105,7 @@ async function resolveAssignee(input: TaskInput): Promise<{ assignee: string | n
 
 /** Staff only. New tasks always start in To do. */
 export async function createTask(input: TaskInput, actor: SessionUser | null): Promise<Task> {
-  const user = requireRole(actor, "admin", "organizer", "treasurer");
+  const user = requireRole(actor, ...CAN.manageTasks);
   await assertEvent(input.eventId);
   const who = await resolveAssignee(input);
   const id = newId("tsk");
@@ -129,7 +130,7 @@ export async function createTask(input: TaskInput, actor: SessionUser | null): P
 
 /** Staff only. Edits the details and the assignment; the status is left alone. */
 export async function updateTask(id: string, input: TaskInput, actor: SessionUser | null): Promise<Task> {
-  requireRole(actor, "admin", "organizer", "treasurer");
+  requireRole(actor, ...CAN.manageTasks);
   // Read and write together: the volunteer count checked here must still hold when the row is written.
   return tx(async () => {
     const current = await getTask(id);
@@ -185,7 +186,7 @@ export async function transitionTask(id: string, action: TaskAction, actor: Sess
         !!(await get(`SELECT 1 AS mine FROM tasks t WHERE t.id = ? AND ${IS_MINE}`, id, actor.memberId, actor.memberId));
       if (!row || !mine) throw notFound("Task");
     } else {
-      requireRole(actor, "admin", "organizer", "treasurer");
+      requireRole(actor, ...CAN.manageTasks);
       if (!row) throw notFound("Task");
     }
 

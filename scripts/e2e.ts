@@ -361,10 +361,13 @@ async function main(): Promise<void> {
   assert.equal((await organizer.post(`/api/events/${eventId}/registrations`, { name: "Desk Payer", email: "desk.payer@campus.example", payNow: "cash" })).status, 403);
   assert.equal((await organizer.post("/api/tickets/verify", { code })).data.outcome, "payment_required");
   ok("an organizer cannot take a ticket payment: not at the door, not on the ticket, not at the desk (403), and the ticket stays unpaid");
-  const admitted = await treasurer.post("/api/tickets/check-in", { code: code.toLowerCase().replace(/-/g, " "), eventId, collectPayment: true, method: "upi" });
+  // The treasurer does not run the door: they record the payment on the ticket, and the organizer admits the holder.
+  assert.equal((await treasurer.post("/api/tickets/check-in", { code, eventId, collectPayment: true, method: "upi" })).status, 403);
+  assert.equal((await treasurer.post(`/api/tickets/${code}`, { action: "pay", method: "upi" })).data.ticket.paymentStatus, "paid");
+  const admitted = await organizer.post("/api/tickets/check-in", { code: code.toLowerCase().replace(/-/g, " "), eventId });
   assert.equal(admitted.data.outcome, "checked_in");
   assert.equal(admitted.data.ticket.paymentStatus, "paid");
-  ok("the treasurer collecting payment at the door admits the holder (code typed loosely)");
+  ok("the treasurer records the payment on the ticket, cannot check anyone in, and the organizer admits the holder (code typed loosely)");
   const again = await organizer.post("/api/tickets/check-in", { code, eventId });
   assert.equal(again.data.outcome, "already_checked_in");
   assert.equal(again.data.ticket.checkedInAt, admitted.data.ticket.checkedInAt);
@@ -1201,6 +1204,66 @@ async function main(): Promise<void> {
   assert.equal((await admin.get("/api/members")).data.length, membersBefore2);
   assert.equal((await admin.get("/api/accounts")).data.length, 6);
   ok("promoting a member adds a linked committee account and leaves the member record as it was");
+
+  // What the treasurer no longer does, called directly.
+  assert.equal((await treasurer.post("/api/tickets/verify", { code: "SKY-AAAA-BBBB", eventId })).status, 403);
+  assert.equal((await treasurer.post("/api/tickets/check-in", { code: "SKY-AAAA-BBBB", eventId, collectPayment: true, method: "cash" })).status, 403);
+  assert.equal((await treasurer.get("/api/tasks")).status, 403);
+  assert.equal((await treasurer.post("/api/tasks", { title: "Treasurer's task" })).status, 403);
+  assert.equal((await treasurer.get("/api/volunteer-requests")).status, 403);
+  const memberCountNow = (await treasurer.get("/api/members")).data.length;
+  assert.equal((await treasurer.post("/api/members", { name: "Added By Treasurer", email: "added.by.treasurer@e2e.example", duesPaid: false })).status, 403);
+  assert.equal((await organizer.post("/api/members", { name: "Added By Organizer", email: "added.by.organizer@e2e.example", duesPaid: false })).status, 403);
+  assert.equal((await treasurer.get("/api/members")).data.length, memberCountNow);
+  assert.equal((await treasurer.get(`/api/members/${memberId}`)).status, 200);
+  assert.equal((await treasurer.get("/api/finance/summary")).status, 200);
+  assert.equal((await treasurer.get("/api/orders")).status, 200);
+  assert.equal((await treasurer.get("/api/dashboard")).data.tasks, null);
+  assert.equal((await organizer.get("/api/tasks")).status, 200);
+  const byPresident = await admin.post("/api/members", { name: "Added By President", email: "added.by.president@e2e.example", duesPaid: false });
+  assert.equal(byPresident.status, 200, JSON.stringify(byPresident.error));
+  ok("the treasurer is refused the door, volunteer tasks and adding a member by hand, and keeps members, finance and orders");
+
+  // A committee account linked to a member record buys merchandise and pays online as that member.
+  assert.equal((await admin.patch(`/api/accounts/${promoted.data.account.id}`, { role: "treasurer" })).data.role, "treasurer");
+  const linkToken = promoted.data.setupLink.path.split("/").pop();
+  assert.equal((await anon.post("/api/auth/staff-setup", { token: linkToken, password: "linked treasurer password" })).status, 200);
+  const linked = new Client();
+  const linkedLogin = await linked.post("/api/auth/login", { email: memberBefore.email, password: "linked treasurer password" });
+  assert.equal(linkedLogin.data.user.role, "treasurer");
+  assert.equal(linkedLogin.data.user.memberId, null);
+  assert.equal(linkedLogin.data.user.linkedMemberNo, memberBefore.memberNo);
+  assert.equal((await linked.get("/api/finance/summary")).status, 200);
+  assert.equal((await linked.get("/api/me")).status, 403);
+  assert.equal((await treasurer.post("/api/me/checkout", { items: [{ variantId: roleProduct.variants[0].id, quantity: 1 }] })).status, 403);
+  assert.equal((await treasurer.get("/api/me/orders")).status, 403);
+
+  const linkedOrder = await linked.post("/api/me/checkout", { items: [{ variantId: roleProduct.variants[0].id, quantity: 1 }], name: "Someone Else", email: "other@e2e.example" });
+  assert.equal(linkedOrder.status, 200, JSON.stringify(linkedOrder.error));
+  assert.equal(linkedOrder.data.buyerName, memberBefore.name);
+  assert.equal(linkedOrder.data.payOnline, true);
+  assert.ok(linkedOrder.data.unpaidCents > 0);
+  const linkedPay = `/api/me/orders/${linkedOrder.data.code}/pay`;
+  assert.equal((await treasurer.post(linkedPay, { action: "start" })).status, 403);
+  assert.equal((await wandaShop.post(linkedPay, { action: "start" })).status, 404);
+  const linkedStart = await linked.post(linkedPay, { action: "start", amountCents: 1 });
+  assert.equal(linkedStart.status, 200, JSON.stringify(linkedStart.error));
+  assert.equal(linkedStart.data.checkout.amountCents, linkedOrder.data.unpaidCents);
+  assert.equal(fakeRazorpay.orders.get(linkedStart.data.checkout.orderId)?.amount, linkedOrder.data.unpaidCents);
+  const linkedPayment = fakeRazorpay.pay(linkedStart.data.checkout.orderId);
+  const linkedConfirm = (signature: string) =>
+    linked.post(linkedPay, { action: "confirm", razorpayOrderId: linkedStart.data.checkout.orderId, razorpayPaymentId: linkedPayment.id, razorpaySignature: signature });
+  assert.equal((await linkedConfirm("0".repeat(64))).status, 400);
+  assert.equal((await linked.get("/api/me/orders")).data[0].unpaidCents, linkedOrder.data.unpaidCents);
+  const linkedPaid = await linkedConfirm(signHex(RAZORPAY_KEY_SECRET, `${linkedStart.data.checkout.orderId}|${linkedPayment.id}`));
+  assert.equal(linkedPaid.status, 200, JSON.stringify(linkedPaid.error));
+  assert.equal(linkedPaid.data.order.unpaidCents, 0);
+  assert.equal((await deliverWebhook("payment.captured", linkedPayment, "evt_e2e_linked_1")).body.data.outcome, "already_recorded");
+  const linkedEntries = (await treasurer.get("/api/transactions?category=merchandise")).data.filter((t: any) => t.description.includes(linkedPayment.id));
+  assert.equal(linkedEntries.length, 1);
+  assert.equal(linkedEntries[0].status, "settled");
+  assert.equal(linkedEntries[0].amountCents, linkedOrder.data.unpaidCents);
+  ok("a treasurer linked to a member record pays a merchandise order online; one without a member record cannot, and a forged signature pays nothing");
 
   // --- cross-site requests ---------------------------------------------------------
   const crossSite = new Client({ Origin: "https://evil.example" });

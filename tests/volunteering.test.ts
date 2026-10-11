@@ -32,7 +32,7 @@ beforeEach(async () => {
   staff = await freshDb();
   members = [];
   for (let n = 1; n <= 6; n++) {
-    members.push(await createMember(memberInputSchema.parse({ name: `Member ${n}`, email: `member${n}@campus.example`, duesPaid: true }), staff.treasurer));
+    members.push(await createMember(memberInputSchema.parse({ name: `Member ${n}`, email: `member${n}@campus.example`, duesPaid: true }), staff.admin));
   }
   event = await publishedEvent(staff, { title: "Winter Gala" });
 });
@@ -272,7 +272,7 @@ describe("approving and rejecting", () => {
 
 describe("the existing task system", () => {
   it("keeps direct assignment, progression and committee management working", async () => {
-    const direct = await createTask(taskInputSchema.parse({ title: "Print posters", assigneeMemberId: members[0].id }), staff.treasurer);
+    const direct = await createTask(taskInputSchema.parse({ title: "Print posters", assigneeMemberId: members[0].id }), staff.admin);
     expect(direct).toMatchObject({ volunteerSlots: 0, approvedVolunteers: 0, assigneeMemberId: members[0].id });
     expect((await listMemberTasks(members[0].id)).map((t) => t.id)).toEqual([direct.id]);
     expect((await transitionTask(direct.id, "start", asMember(members[0]))).status).toBe("in_progress");

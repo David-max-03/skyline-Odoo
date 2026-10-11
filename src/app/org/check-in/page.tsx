@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { Ban, Banknote, CircleAlert, CircleCheck, CircleX, ScanLine, Search, type LucideIcon } from "lucide-react";
+import { Ban, Banknote, CircleAlert, CircleCheck, CircleX, Info, ScanLine, Search, type LucideIcon } from "lucide-react";
 import { Suspense, useRef, useState, type FormEvent } from "react";
 import { Money, percent } from "@/components/domain";
 import { useToast } from "@/components/overlay";
@@ -15,6 +15,7 @@ import {
   ErrorState,
   LoadingBlock,
   Meter,
+  Notice,
   PageHeader,
   SelectField,
   TextField,
@@ -269,6 +270,18 @@ function CheckInDesk() {
 }
 
 export default function CheckInPage() {
+  const canCheckIn = useCan("checkIn");
+  if (!canCheckIn) {
+    return (
+      <>
+        <PageHeader title="Check-in" />
+        <Notice tone="neutral" icon={Info}>
+          The door is run by the president and the event handler. Your role does not include check-in; ticket payments are recorded
+          from the event page.
+        </Notice>
+      </>
+    );
+  }
   return (
     <>
       <PageHeader

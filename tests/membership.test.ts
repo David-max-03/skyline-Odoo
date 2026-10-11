@@ -59,7 +59,7 @@ const application = (n: number, overrides: Record<string, unknown> = {}): Applic
 const paidMember = (n: number) =>
   createMember(
     memberInputSchema.parse({ name: `Member ${n}`, email: `member${n}@campus.example`, duesPaid: true }),
-    staff.treasurer,
+    staff.admin,
   );
 
 /** A member who has set a password, and the session a sign-in gives them. */
@@ -102,7 +102,7 @@ describe("member sign-in", () => {
     // and as a member (never as staff) with the member password.
     const member = await createMember(
       memberInputSchema.parse({ name: "Treasurer", email: "treasurer@test.example", duesPaid: true }),
-      staff.treasurer,
+      staff.admin,
     );
     await completeSetup((await createSetupToken(member.id, staff.admin.id)).token, PASSWORD);
     expect((await login("treasurer@test.example", "password-1")).user.role).toBe("treasurer");
@@ -338,7 +338,7 @@ describe("membership applications", () => {
   it("does not turn an approval into a second member if the email joined meanwhile", async () => {
     await submitApplication(application(1), PNG);
     const [pending] = await listApplications(staff.treasurer);
-    await createMember(memberInputSchema.parse({ name: "Applicant 1", email: "applicant1@campus.example", duesPaid: true }), staff.treasurer);
+    await createMember(memberInputSchema.parse({ name: "Applicant 1", email: "applicant1@campus.example", duesPaid: true }), staff.admin);
     expect((await appError(() => reviewApplication(pending.id, { action: "approve", paymentReceived: true }, staff.treasurer))).code).toBe("email_taken");
     // The failed approval rolled back completely.
     expect((await listApplications(staff.treasurer))[0].status).toBe("pending");

@@ -102,7 +102,7 @@ export async function viewEvent(id: string, actor: Actor): Promise<EventDetailVi
 
 /** The permission an alert's content belongs to; null is shown to every committee role. */
 const ALERT_NEEDS: Record<DashboardAlert["kind"], keyof typeof CAN | null> = {
-  overdue_tasks: null,
+  overdue_tasks: "manageTasks",
   pending_reimbursements: "manageFinance",
   refunds_due: "manageFinance",
   unpaid_tickets: "manageFinance",
@@ -117,6 +117,7 @@ export async function viewDashboard(actor: Actor): Promise<DashboardView> {
   return {
     ...dashboard,
     members: can(user, "manageMembers") ? dashboard.members : null,
+    tasks: can(user, "manageTasks") ? dashboard.tasks : null,
     finance: finance ? dashboard.finance : null,
     cashflow: finance ? dashboard.cashflow : [],
     eventPerformance: finance

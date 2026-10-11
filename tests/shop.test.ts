@@ -64,7 +64,7 @@ const guest = (items: { variantId: string; quantity: number }[], n = 1, memberNo
 const member = (n: number, overrides: Record<string, unknown> = {}) =>
   createMember(
     memberInputSchema.parse({ name: `Member ${n}`, email: `member${n}@campus.example`, duesPaid: true, ...overrides }),
-    staff.treasurer,
+    staff.admin,
   );
 
 describe("the catalogue", () => {
@@ -404,15 +404,17 @@ describe("orders after checkout", () => {
     const mine = await checkoutAsMember(items, a.id);
     await checkoutAsMember(items, b.id);
     await checkout(guest(items, 5));
-    // Bought before signing in, with the same email: still theirs.
-    await checkout(checkoutInputSchema.parse({ items, name: "Member 1", email: a.email.toUpperCase() }));
+    // A guest order that only types the member's email is not theirs: anyone can type any email.
+    const typed = await checkout(checkoutInputSchema.parse({ items, name: "Someone Else", email: a.email.toUpperCase() }));
+    // A guest order that proves the membership (member number and its email) is.
+    const proven = await checkout(checkoutInputSchema.parse({ items, name: "Member 1", email: a.email, memberNo: a.memberNo }));
 
     const history = await listMemberOrders(a.id);
-    expect(history).toHaveLength(2);
-    expect(history.map((o) => o.code)).toContain(mine.code);
+    expect(history.map((o) => o.code).sort()).toEqual([mine.code, proven.code].sort());
+    expect(history.map((o) => o.code)).not.toContain(typed.code);
     expect(history.every((o) => o.buyerName === "Member 1")).toBe(true);
     expect(await listMemberOrders(b.id)).toHaveLength(1);
     expect((await appError(() => listMemberOrders("mem_missing"))).status).toBe(404);
-    expect(await listOrders()).toHaveLength(4);
+    expect(await listOrders()).toHaveLength(5);
   });
 });

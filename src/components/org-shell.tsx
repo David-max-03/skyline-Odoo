@@ -34,6 +34,8 @@ interface NavItem {
   exact?: boolean;
   /** Shown only to roles with this permission. The server refuses the page's data to anyone else regardless. */
   needs?: keyof typeof CAN;
+  /** For a phone tab: what takes its place for a role that cannot open it. */
+  fallback?: NavItem;
 }
 
 /** Add a staff page here and it appears in the sidebar and the mobile menu. */
@@ -48,8 +50,8 @@ export const ORG_NAV: { heading: string; items: NavItem[] }[] = [
     heading: "Run events",
     items: [
       { href: "/org/events", label: "Events", icon: CalendarDays },
-      { href: "/org/check-in", label: "Check-in", icon: ScanLine },
-      { href: "/org/tasks", label: "Volunteer tasks", icon: ListChecks },
+      { href: "/org/check-in", label: "Check-in", icon: ScanLine, needs: "checkIn" },
+      { href: "/org/tasks", label: "Volunteer tasks", icon: ListChecks, needs: "manageTasks" },
     ],
   },
   {
@@ -170,12 +172,9 @@ function AccountPanel() {
 const TABS: NavItem[] = [
   { href: "/org", label: "Home", icon: LayoutDashboard, exact: true },
   { href: "/org/events", label: "Events", icon: CalendarDays },
-  { href: "/org/check-in", label: "Check-in", icon: ScanLine },
-  { href: "/org/finance", label: "Finance", icon: Wallet, needs: "manageFinance" },
+  { href: "/org/check-in", label: "Check-in", icon: ScanLine, needs: "checkIn", fallback: { href: "/org/members", label: "Members", icon: Users, needs: "manageMembers" } },
+  { href: "/org/finance", label: "Finance", icon: Wallet, needs: "manageFinance", fallback: { href: "/org/tasks", label: "Tasks", icon: ListChecks, needs: "manageTasks" } },
 ];
-
-/** Takes the place of a tab the signed-in role cannot open. */
-const FALLBACK_TAB: NavItem = { href: "/org/tasks", label: "Tasks", icon: ListChecks };
 
 const isActive = (item: NavItem, pathname: string) =>
   item.exact ? pathname === item.href : pathname.startsWith(item.href);
@@ -185,7 +184,9 @@ export function OrgShell({ children }: { children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const pathname = usePathname();
   const user = useSession();
-  const tabs = TABS.map((tab) => (tab.needs && !can(user, tab.needs) ? FALLBACK_TAB : tab));
+  // A tab the role cannot open gives its place to its stand-in, if the role can open that.
+  const allowed = (item: NavItem) => !item.needs || can(user, item.needs);
+  const tabs = TABS.flatMap((tab) => (allowed(tab) ? [tab] : tab.fallback && allowed(tab.fallback) ? [tab.fallback] : []));
   const onTabPage = tabs.some((tab) => isActive(tab, pathname));
 
   useEffect(() => {
@@ -240,7 +241,7 @@ export function OrgShell({ children }: { children: ReactNode }) {
         </div>
       )}
 
-      <main id="main" className="pb-tabbar mx-auto w-full max-w-6xl px-4 pt-6 sm:px-6 sm:pt-8 lg:px-8">
+      <main id="main" className="pb-tabbar page-shell-wide pt-(--page-space)">
         {children}
       </main>
 

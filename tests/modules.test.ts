@@ -29,12 +29,12 @@ const member = (n: number, overrides: Record<string, unknown> = {}) =>
 
 describe("memberships", () => {
   it("activates a member only once dues are collected", async () => {
-    const paid = await createMember(member(1), staff.treasurer);
+    const paid = await createMember(member(1), staff.admin);
     expect(paid.memberNo).toBe("SKY-M-0001");
     expect(paid.status).toBe("active");
     expect(paid.paidUntilOn).toBe(`${today().slice(0, 4)}-12-31`);
 
-    const joined = await createMember(member(2, { name: "Walk Up", duesPaid: false }), staff.treasurer);
+    const joined = await createMember(member(2, { name: "Walk Up", duesPaid: false }), staff.admin);
     expect(joined.memberNo).toBe("SKY-M-0002");
     expect(joined.duesOwedCents).toBe(SETTINGS.membershipFeeCents);
     const unpaid = (await listMembers()).find((m) => m.memberNo === "SKY-M-0002")!;
@@ -51,25 +51,25 @@ describe("memberships", () => {
   });
 
   it("rejects duplicate emails and unauthorised changes", async () => {
-    await createMember(member(1), staff.treasurer);
-    expect((await appError(() => createMember(member(1), staff.treasurer))).code).toBe("email_taken");
-    expect((await appError(() => createMember(member(1, { email: "MEMBER1@campus.example" }), staff.treasurer))).code).toBe("email_taken");
+    await createMember(member(1), staff.admin);
+    expect((await appError(() => createMember(member(1), staff.admin))).code).toBe("email_taken");
+    expect((await appError(() => createMember(member(1, { email: "MEMBER1@campus.example" }), staff.admin))).code).toBe("email_taken");
     expect((await appError(() => createMember(member(2), staff.organizer))).status).toBe(403);
     expect((await appError(() => createMember(member(2), null))).status).toBe(401);
   });
 
   it("flags memberships that are ending and marks them lapsed afterwards", async () => {
-    const m = await createMember(member(1, { expiresOn: addDays(today(), 10) }), staff.treasurer);
+    const m = await createMember(member(1, { expiresOn: addDays(today(), 10) }), staff.admin);
     expect(m.status).toBe("expiring");
     expect(m.daysToExpiry).toBe(10);
     setClock(() => new Date(Date.now() + 11 * 86_400_000));
     expect((await listMembers())[0].status).toBe("lapsed");
     setClock(null);
-    expect((await appError(() => createMember(member(2, { expiresOn: addDays(today(), -1) }), staff.treasurer))).status).toBe(422);
+    expect((await appError(() => createMember(member(2, { expiresOn: addDays(today(), -1) }), staff.admin))).status).toBe(422);
   });
 
   it("renews from the day after the current term and keeps the history", async () => {
-    const m = await createMember(member(1), staff.treasurer);
+    const m = await createMember(member(1), staff.admin);
     const year = Number(today().slice(0, 4));
     const renewed = await renewMember(m.id, { duesPaid: true, method: "upi" }, staff.treasurer);
     expect(renewed.paidUntilOn).toBe(`${year + 1}-12-31`);
@@ -86,9 +86,9 @@ describe("memberships", () => {
 
   it("applies the member price only for a matching number, email and paid term", async () => {
     const event = await publishedEvent(staff); // 500 standard, 400 member
-    const active = await createMember(member(1), staff.treasurer);
-    const unpaid = await createMember(member(2, { name: "Unpaid", email: "unpaid@campus.example", duesPaid: false }), staff.treasurer);
-    const lapsing = await createMember(member(3, { expiresOn: addDays(today(), 2) }), staff.treasurer);
+    const active = await createMember(member(1), staff.admin);
+    const unpaid = await createMember(member(2, { name: "Unpaid", email: "unpaid@campus.example", duesPaid: false }), staff.admin);
+    const lapsing = await createMember(member(3, { expiresOn: addDays(today(), 2) }), staff.admin);
 
     const ok = await registerForEvent(event.id, { name: "Member 1", email: active.email, studentId: null, memberNo: active.memberNo.toLowerCase() });
     expect(ok.priceCents).toBe(40000);
@@ -181,7 +181,7 @@ describe("merchandise", () => {
 
   it("gives members the member price", async () => {
     const p = await hoodie();
-    const m = await createMember(member(1), staff.treasurer);
+    const m = await createMember(member(1), staff.admin);
     const placed = await placeOrder({ productId: p.id, variantId: p.variants[0].id, quantity: 1, name: m.name, email: m.email, memberNo: m.memberNo });
     expect(placed.totalCents).toBe(100000);
     expect(placed.isMember).toBe(true);

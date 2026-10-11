@@ -53,7 +53,7 @@ export function MemberShell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="no-print sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur">
-        <div className="mx-auto flex h-16 max-w-5xl items-center justify-between gap-4 px-4 sm:px-6">
+        <div className="page-shell flex h-16 items-center justify-between gap-4">
           <Link href="/member" aria-label="Skyline member home" className="rounded-control">
             <Logo compact />
           </Link>
@@ -74,7 +74,7 @@ export function MemberShell({ children }: { children: ReactNode }) {
             </button>
           </div>
         </div>
-        <nav aria-label="Member" className="no-scrollbar mx-auto flex max-w-5xl gap-1 overflow-x-auto px-4 pb-2 sm:px-6">
+        <nav aria-label="Member" className="no-scrollbar page-shell flex gap-1 overflow-x-auto pb-2">
           {MEMBER_NAV.map((item) => {
             const active = item.exact ? pathname === item.href : pathname === item.href || pathname.startsWith(`${item.href}/`);
             return (
@@ -94,7 +94,7 @@ export function MemberShell({ children }: { children: ReactNode }) {
           })}
         </nav>
       </header>
-      <main id="main" className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
+      <main id="main" className="page-shell flex-1 py-(--page-space)">
         {children}
       </main>
     </div>

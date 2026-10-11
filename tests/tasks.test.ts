@@ -29,7 +29,7 @@ beforeEach(async () => {
 async function memberAccount(n: number) {
   const member = await createMember(
     memberInputSchema.parse({ name: `Member ${n}`, email: `member${n}@campus.example`, duesPaid: true }),
-    staff.treasurer,
+    staff.admin,
   );
   await completeSetup((await createSetupToken(member.id, staff.admin.id)).token, "a-long-test-password");
   return { member, user: (await login(member.memberNo, "a-long-test-password")).user };
@@ -144,7 +144,7 @@ describe("tasks and member accounts", () => {
   it("keeps staff rules: any staff role moves tasks, reassignment follows the member record", async () => {
     const a = await memberAccount(1);
     const task = await newTask({ assigneeMemberId: a.member.id });
-    expect((await transitionTask(task.id, "start", staff.treasurer)).status).toBe("in_progress");
+    expect((await transitionTask(task.id, "start", staff.admin)).status).toBe("in_progress");
     expect((await appError(() => newTask({ assigneeMemberId: "mem_missing" }))).fields?.assigneeMemberId).toBeTruthy();
 
     // Unassigning takes the task off the member's list.

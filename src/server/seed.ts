@@ -113,16 +113,16 @@ export async function seedDemoData(): Promise<SeedSummary> {
     };
     if (i < 16) {
       // Paid annual members who joined over the last two months.
-      await at(-70 + i * 3, () => createMember({ ...input, duesPaid: true, expiresOn: null }, treasurer));
+      await at(-70 + i * 3, () => createMember({ ...input, duesPaid: true, expiresOn: null }, admin));
     } else if (i < 19) {
       // Semester passes that end soon: these drive the renewal reminders.
-      await at(-60, () => createMember({ ...input, duesPaid: true, expiresOn: day([9, 16, 24][i - 16]) }, treasurer));
+      await at(-60, () => createMember({ ...input, duesPaid: true, expiresOn: day([9, 16, 24][i - 16]) }, admin));
     } else if (i < 21) {
       // Lapsed: the paid term ended a few weeks ago.
-      await at(-200, () => createMember({ ...input, duesPaid: true, expiresOn: day([-15, -40][i - 19]) }, treasurer));
+      await at(-200, () => createMember({ ...input, duesPaid: true, expiresOn: day([-15, -40][i - 19]) }, admin));
     } else {
       // Added at the campus table; dues not collected yet.
-      await at(-3 + (i - 21), () => createMember({ ...input, duesPaid: false, expiresOn: null }, treasurer));
+      await at(-3 + (i - 21), () => createMember({ ...input, duesPaid: false, expiresOn: null }, admin));
     }
   }
 
@@ -184,7 +184,7 @@ export async function seedDemoData(): Promise<SeedSummary> {
       await at(plan.eventDay + 0.02, async () => {
         for (const t of tickets.slice(0, plan.attended)) {
           // People who had not paid settle at the door, as happens in real life.
-          await checkIn({ code: t.code, eventId: created.id, collectPayment: true, method: "cash" }, treasurer);
+          await checkIn({ code: t.code, eventId: created.id, collectPayment: true, method: "cash" }, admin);
         }
       });
     }

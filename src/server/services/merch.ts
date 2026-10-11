@@ -348,6 +348,18 @@ interface OrderRow {
   checkout_code: string | null;
 }
 
+/**
+ * Whose order it is, for a member's own list and for paying online. An order
+ * belongs to a member when it was placed from their signed-in account
+ * (recorded on the checkout), or as a guest who proved the membership with the
+ * member number and its email (recorded on the order).
+ *
+ * The email typed at checkout is never enough: anyone can type any email, so
+ * matching on it would put a stranger's order in a member's list.
+ * Takes the member id twice.
+ */
+const OWNED_BY_MEMBER = "(o.member_id = ? OR c.member_id = ?)";
+
 // The name and size a line was sold as win over the product's current ones.
 const ORDER_SELECT = `
   SELECT o.id, o.code, o.product_id, o.variant_id, o.quantity, o.unit_price_cents, o.total_cents,
@@ -431,6 +443,12 @@ interface Buyer {
   email: string;
   /** Set when the member price applies: an active member, already verified by the caller. */
   memberId: string | null;
+  /**
+   * The member whose signed-in account placed the order, whether or not the
+   * member price applied. Kept on the checkout, so the order is theirs by
+   * record and not by whatever email was typed.
+   */
+  ownerMemberId?: string | null;
 }
 
 /**
@@ -489,7 +507,7 @@ async function placeLines(
     checkoutCode,
     buyer.name,
     buyer.email,
-    buyer.memberId,
+    buyer.ownerMemberId ?? buyer.memberId,
     totalCents,
     ts,
   );
@@ -570,7 +588,7 @@ export async function checkoutAsMember(items: { variantId: string; quantity: num
     );
     if (!member) throw notFound("Member");
     const active = await findActiveMember(member.email, member.member_no);
-    return placeLines(items, { name: member.name, email: member.email, memberId: active ? active.id : null }, true);
+    return placeLines(items, { name: member.name, email: member.email, memberId: active ? active.id : null, ownerMemberId: memberId }, true);
   });
 }
 
@@ -607,12 +625,11 @@ export async function placeOrder(input: OrderInput): Promise<PublicOrder> {
  * single-line orders. Nobody else's orders can appear here.
  */
 export async function listMemberOrders(memberId: string): Promise<ShopOrder[]> {
-  const member = await get<{ email: string }>("SELECT email FROM members WHERE id = ?", memberId);
-  if (!member) throw notFound("Member");
+  if (!await get("SELECT 1 FROM members WHERE id = ?", memberId)) throw notFound("Member");
   const rows = await all<OrderRow>(
-    `${ORDER_SELECT} WHERE o.member_id = ? OR o.buyer_email = ? ORDER BY o.created_at DESC, o.checkout_id, o.line_no, o.id`,
+    `${ORDER_SELECT} WHERE ${OWNED_BY_MEMBER} ORDER BY o.created_at DESC, o.checkout_id, o.line_no, o.id`,
     memberId,
-    member.email,
+    memberId,
   );
   const groups = new Map<string, OrderRow[]>();
   for (const row of rows) {
@@ -642,17 +659,16 @@ export async function memberOrder(
   memberId: string,
   code: string,
 ): Promise<{ order: ShopOrder; owed: { orderId: string; amountCents: number }[] }> {
-  const member = await get<{ email: string }>("SELECT email FROM members WHERE id = ?", memberId);
-  if (!member) throw notFound("Member");
+  if (!await get("SELECT 1 FROM members WHERE id = ?", memberId)) throw notFound("Member");
   const wanted = code.trim().toUpperCase();
   const rows = await all<OrderRow>(
     `${ORDER_SELECT}
-     WHERE (c.code = ? OR (o.checkout_id IS NULL AND o.code = ?)) AND (o.member_id = ? OR o.buyer_email = ?)
+     WHERE (c.code = ? OR (o.checkout_id IS NULL AND o.code = ?)) AND ${OWNED_BY_MEMBER}
      ORDER BY o.line_no, o.id`,
     wanted,
     wanted,
     memberId,
-    member.email,
+    memberId,
   );
   if (rows.length === 0) throw notFound("Order");
   return {
@@ -679,6 +695,24 @@ export interface OrderActionResult {
   refundDueCents: number;
 }
 
+/**
+ * True when the order is the acting committee account's own: placed by or for
+ * the member that account is linked to, or placed as a guest with the
+ * account's own email. The link is read from the database, not from the session object.
+ */
+async function isOwnOrder(orderId: string, buyerEmail: string, user: SessionUser): Promise<boolean> {
+  const account = await get<{ email: string; member_id: string | null }>("SELECT email, member_id FROM users WHERE id = ?", user.id);
+  if (!account) return false;
+  if (buyerEmail.toLowerCase() === account.email.toLowerCase()) return true;
+  if (!account.member_id) return false;
+  return !!(await get(
+    `SELECT 1 FROM orders o LEFT JOIN checkouts c ON c.id = o.checkout_id WHERE o.id = ? AND ${OWNED_BY_MEMBER}`,
+    orderId,
+    account.member_id,
+    account.member_id,
+  ));
+}
+
 export async function actOnOrder(
   id: string,
   action: "pay" | "fulfil" | "cancel",
@@ -693,6 +727,10 @@ export async function actOnOrder(
 
     if (action === "pay") {
       if (row.payment_status === "paid") throw conflict("not_pending", "This order is already paid.");
+      // Nobody records the payment for their own order: someone else on the committee does, or it is paid online.
+      if (await isOwnOrder(id, row.buyer_email, user)) {
+        throw forbidden("This is your own order. Pay it online, or ask another committee member to record the payment.");
+      }
       await settlePendingFor({ orderId: id }, method);
     }
 

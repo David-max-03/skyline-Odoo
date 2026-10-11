@@ -110,7 +110,24 @@ export interface SessionUser {
   /** Set only for member accounts. */
   memberId: string | null;
   memberNo: string | null;
+  /**
+   * Set for a committee account that was given to an existing member
+   * (`users.member_id`). It never makes the session a member session: it only
+   * lets that person order and pay for merchandise as the member they are.
+   */
+  linkedMemberId?: string | null;
+  linkedMemberNo?: string | null;
 }
+
+/**
+ * The member a signed-in person shops as: themselves for a member account, the
+ * linked member for a committee account that has one, otherwise nobody.
+ */
+export const shopperMember = (user: SessionUser | null | undefined): { id: string; memberNo: string | null } | null => {
+  if (!user) return null;
+  if (user.role === "member") return user.memberId ? { id: user.memberId, memberNo: user.memberNo } : null;
+  return user.linkedMemberId ? { id: user.linkedMemberId, memberNo: user.linkedMemberNo ?? null } : null;
+};
 
 export const isStaff = (user: SessionUser | null | undefined): boolean =>
   !!user && user.role !== "member";
@@ -126,7 +143,18 @@ export const loginSchema = z.object({
 });
 export type LoginInput = z.infer<typeof loginSchema>;
 
-export const MEMBER_PASSWORD_MIN = 10;
+/**
+ * The shortest password accepted wherever a password is set or changed:
+ * member setup and reset links, a member changing their own password,
+ * committee setup and reset links, and the command-line account scripts.
+ *
+ * It is checked only when a password is chosen. Signing in never checks
+ * length, so a password set under an earlier rule keeps working unchanged.
+ */
+export const PASSWORD_MIN = 8;
+
+/** Member passwords: the common minimum. */
+export const MEMBER_PASSWORD_MIN = PASSWORD_MIN;
 
 export const setupTokenSchema = z.object({
   token: z.string({ error: "This link is incomplete" }).min(20, "This link is incomplete").max(200),
@@ -190,7 +218,8 @@ export interface SetupLink {
  */
 export const CAN = {
   manageEvents: ["admin", "organizer"],
-  checkIn: ["admin", "organizer", "treasurer"],
+  /** Run the door: look a ticket up and let its holder in. Not the treasurer, who takes payments from the event page. */
+  checkIn: ["admin", "organizer"],
   /** Record that a ticket was paid for. Never the event organizer. */
   collectPayment: ["admin", "treasurer"],
   /**
@@ -204,13 +233,21 @@ export const CAN = {
   manageFinance: ["admin", "treasurer"],
   fileExpenseClaim: ["admin", "treasurer", "organizer"],
   manageMembers: ["admin", "treasurer"],
-  manageTasks: ["admin", "organizer", "treasurer"],
+  /**
+   * Add a member by hand, without an application. The treasurer still reviews
+   * applications and payments, which is how a member normally comes to exist.
+   */
+  addMembers: ["admin"],
+  /** Volunteer tasks: see the board, create, edit and move tasks. Not the treasurer. */
+  manageTasks: ["admin", "organizer"],
   manageAnnouncements: ["admin", "organizer"],
   /** Approve or reject members' requests to volunteer for a task. */
   reviewVolunteers: ["admin", "organizer"],
   manageMerch: ["admin", "treasurer"],
   /** See, disable and re-enable committee accounts. */
   manageAccounts: ["admin"],
+  /** File an expense claim on behalf of a committee member or a volunteer. */
+  fileClaimForOthers: ["admin"],
 } as const satisfies Record<string, readonly Role[]>;
 
 export function can(user: SessionUser | null | undefined, action: keyof typeof CAN): boolean {
@@ -238,8 +275,8 @@ export const ACCOUNT_ACTIONS = ["disable", "enable"] as const;
 export const accountActionSchema = z.object({ action: z.enum(ACCOUNT_ACTIONS) });
 export type AccountAction = (typeof ACCOUNT_ACTIONS)[number];
 
-/** Committee passwords get a higher bar than member ones. */
-export const STAFF_PASSWORD_MIN = 12;
+/** Committee passwords: the common minimum. */
+export const STAFF_PASSWORD_MIN = PASSWORD_MIN;
 
 const committeeRole = z.enum(ROLES, { error: "Choose a committee role" });
 
@@ -647,8 +684,24 @@ export const claimInputSchema = z.object({
   justification: text(10, 600, "Why it was needed"),
   notes: optionalText(600),
   eventId: idRef,
+  /**
+   * President only: file the claim for someone else. Both or neither. The
+   * server checks the role and that the person exists and may claim; from
+   * anyone else these fields are refused, never ignored.
+   */
+  claimantKind: z.enum(["staff", "member"], { error: "Choose who the claim is for" }).optional(),
+  claimantId: z.string().trim().min(1).max(64).optional(),
 });
 export type ClaimInput = z.infer<typeof claimInputSchema>;
+
+/** Someone the president may file a claim for: a committee account, or a member who volunteers. */
+export interface ClaimantOption {
+  kind: "staff" | "member";
+  id: string;
+  name: string;
+  /** Role for a committee account, member number for a volunteer. */
+  detail: string;
+}
 
 export const CLAIM_STATUSES = ["submitted", "under_review", "approved", "rejected", "paid"] as const;
 export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
@@ -674,8 +727,12 @@ export interface ExpenseClaim {
   claimantName: string;
   /** "member" or "staff": who filed it. */
   claimantKind: "member" | "staff";
-  /** True when the signed-in account filed this claim. Nobody reviews their own. */
+  /** True when the signed-in account is the claimant. Nobody reviews their own. */
   isMine: boolean;
+  /** Who entered the claim, when that was not the claimant (the president, on their behalf). */
+  filedByName: string | null;
+  /** True when the signed-in account entered this claim for someone else. They do not review it either. */
+  filedByMe: boolean;
   title: string;
   justification: string;
   notes: string | null;
@@ -699,6 +756,8 @@ export interface ExpenseClaim {
 export interface ClaimAccess {
   canSubmit: boolean;
   canReview: boolean;
+  /** The president may file a claim on behalf of a committee member or volunteer. */
+  canFileForOthers: boolean;
   reason: string | null;
 }
 
@@ -1681,8 +1740,10 @@ export interface EventDetailView {
   profitTarget: ProfitTargetAnalysis | null;
 }
 
-export type DashboardView = Omit<Dashboard, "members" | "finance" | "eventPerformance"> & {
+export type DashboardView = Omit<Dashboard, "members" | "finance" | "eventPerformance" | "tasks"> & {
   members: Dashboard["members"] | null;
+  /** Null for a role that does not run volunteer tasks. */
+  tasks: Dashboard["tasks"] | null;
   finance: FinanceTotals | null;
   eventPerformance: (Omit<Dashboard["eventPerformance"][number], "incomeSettledCents" | "expenseSettledCents" | "netCents"> & {
     incomeSettledCents: number | null;

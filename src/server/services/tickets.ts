@@ -402,7 +402,7 @@ function refusal(row: TicketRow | null, eventId: string | null): CheckInResult |
 
 /** Looks a ticket up for the door without changing it. */
 export async function verifyTicket(rawCode: string, eventId: string | null, actor: SessionUser | null): Promise<CheckInResult> {
-  requireRole(actor, "admin", "organizer", "treasurer");
+  requireRole(actor, ...CAN.checkIn);
   const row = await findRow(rawCode);
   const refused = refusal(row, eventId);
   if (refused) return refused;
@@ -417,7 +417,7 @@ export async function verifyTicket(rawCode: string, eventId: string | null, acto
  * than an error, because the door screen needs to show who and why.
  */
 export async function checkIn(input: CheckInInput, actor: SessionUser | null): Promise<CheckInResult> {
-  const user = requireRole(actor, "admin", "organizer", "treasurer");
+  const user = requireRole(actor, ...CAN.checkIn);
   if (input.collectPayment && !can(user, "collectPayment")) {
     throw forbidden("Only the treasurer or the president can record a ticket payment.");
   }

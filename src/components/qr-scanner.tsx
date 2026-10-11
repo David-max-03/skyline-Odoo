@@ -105,7 +105,7 @@ export function QrScanner({ onScan }: { onScan: (text: string) => void }) {
 
   return (
     <div>
-      <div className="relative aspect-[4/3] w-full overflow-hidden rounded-card bg-night sm:aspect-video">
+      <div className="relative mx-auto aspect-[4/3] max-h-[min(26rem,55dvh)] w-full overflow-hidden rounded-card bg-night sm:aspect-video">
         <video ref={videoRef} playsInline muted className="size-full object-cover" aria-label="Camera preview" />
         {state.phase === "scanning" && (
           <div aria-hidden className="pointer-events-none absolute inset-0 flex items-center justify-center">

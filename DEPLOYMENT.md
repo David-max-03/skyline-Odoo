@@ -66,7 +66,8 @@ npm run db:migrate -- --env-file .env.neon             # applies it
 npm run db:status  -- --env-file .env.neon             # checks tables, keys and uniqueness rules
 ```
 
-The schema is currently at version 4 (version 1 is the baseline; version 2 adds
+The schema is currently at version 5 (version 5 adds who entered an expense claim on
+someone else's behalf; version 1 is the baseline; version 2 adds
 volunteer requests; version 3 adds the column that lets the president disable a
 committee account; version 4 adds the member link and one-time password links for
 committee accounts managed from the web). A database at an older version must be migrated before this
@@ -85,7 +86,7 @@ needs a newer schema.
 npm run admin:create -- --email you@example.org --name "Your Name" --env-file .env.neon
 ```
 
-You are asked for the password at a hidden prompt (at least 12 characters). It
+You are asked for the password at a hidden prompt (at least 8 characters). It
 is never taken from the command line or printed. The command refuses to run
 when an administrator already exists; `--allow-additional` is the deliberate
 override. There is no default account and no demo data on PostgreSQL.
@@ -155,8 +156,12 @@ These points can only be confirmed on the deployed site, and have not been:
   before they reach Skyline. Test with a photo of 4–5 MB.
 - The exact names of Netlify's dashboard menus above, which change over time.
 - Connection time to Neon after it has been idle (about 3 seconds was seen from a laptop).
-- That Netlify passes the visitor's address in `x-forwarded-for`, which the
-  rate limiter uses. Without it every visitor shares one limit.
+- That Netlify sets `x-nf-client-connection-ip` on every function request and
+  replaces any value a visitor sends under that name. The rate limiter reads
+  the visitor's address from it (Netlify documents it as the header to use; the
+  first `X-Forwarded-For` entry is no longer trusted). Without the header every
+  visitor shares one per-address limit. The per-account sign-in limit (10
+  attempts per email or member ID per 15 minutes) does not depend on it.
 
 ## Failure behaviour
 

@@ -32,6 +32,23 @@ describe("public header links", () => {
     expect(hrefs(treasurer)).toEqual(["/", "/events", "/shop", "/org"]);
   });
 
+  it("calls the way back \"My account\" for a member and for the treasurer, and \"Committee\" for the president and event handler", () => {
+    const label = (user: SessionUser | null) => publicNavLinks(user).at(-1)?.label;
+    expect(label(null)).toBe("Login");
+    expect(label(member)).toBe("My account");
+    expect(label(treasurer)).toBe("My account");
+    expect(label({ ...treasurer, role: "admin" })).toBe("Committee");
+    expect(label({ ...treasurer, role: "organizer" })).toBe("Committee");
+    // The wording changes, never where it leads or who may open it.
+    expect(publicNavLinks(treasurer).at(-1)?.href).toBe("/org");
+    // One way in or back, never two, and nothing from the committee menu.
+    for (const user of [null, member, treasurer]) {
+      const links = publicNavLinks(user);
+      expect(links.filter((l) => ["/login", "/member", "/org"].includes(l.href))).toHaveLength(1);
+      expect(links.some((l) => l.href.startsWith("/org/"))).toBe(false);
+    }
+  });
+
   it("shows only the common links until the session is known", () => {
     expect(hrefs(undefined)).toEqual(["/", "/events", "/shop"]);
   });

@@ -44,6 +44,7 @@ function MembersList() {
   const toast = useToast();
   const params = useSearchParams();
   const canManage = useCan("manageMembers");
+  const canAdd = useCan("addMembers");
   const { data, error, reload } = useApi<Member[]>("/api/members");
 
   const initial = params.get("status") as Filter | null;
@@ -83,7 +84,7 @@ function MembersList() {
         title="Members"
         description={`Who has joined, whether their dues are paid, and when their membership ends. Renewal is flagged ${SETTINGS.renewalReminderDays} days ahead.`}
         actions={
-          canManage && (
+          canAdd && (
             <Button icon={UserPlus} onClick={() => setAdding(true)}>
               Add member
             </Button>
@@ -212,18 +213,20 @@ function MembersList() {
         )}
       </Card>
 
-      <Dialog open={adding} onClose={() => setAdding(false)} title="Add a member" description={`Annual dues are ${SETTINGS.membershipFeeCents / 100}. The term runs to 31 December.`}>
-        {adding && (
-          <AddMemberForm
-            onCancel={() => setAdding(false)}
-            onSaved={(member) => {
-              setAdding(false);
-              toast.success(`${member.name} added as ${member.memberNo}.`);
-              reload();
-            }}
-          />
-        )}
-      </Dialog>
+      {canAdd && (
+        <Dialog open={adding} onClose={() => setAdding(false)} title="Add a member" description={`Annual dues are ${SETTINGS.membershipFeeCents / 100}. The term runs to 31 December.`}>
+          {adding && (
+            <AddMemberForm
+              onCancel={() => setAdding(false)}
+              onSaved={(member) => {
+                setAdding(false);
+                toast.success(`${member.name} added as ${member.memberNo}.`);
+                reload();
+              }}
+            />
+          )}
+        </Dialog>
+      )}
 
       <Dialog open={viewing !== null} onClose={() => setViewing(null)} title="Member record" size="lg">
         {viewing && <MemberRecord id={viewing} canManage={canManage} />}

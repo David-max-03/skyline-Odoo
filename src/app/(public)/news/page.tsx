@@ -26,10 +26,10 @@ export default function NewsPage() {
           <EmptyState icon={Megaphone} title="No announcements yet" />
         </Card>
       ) : (
-        <ol className="space-y-4">
+        <ol className="grid gap-4 xl:grid-cols-2">
           {data.map((post) => (
             <li key={post.id}>
-              <Card className="p-5">
+              <Card className="h-full p-5">
                 <article>
                   <p className="text-[0.8125rem] text-muted">
                     <time dateTime={post.publishedAt}>{formatDateTime(post.publishedAt)}</time>

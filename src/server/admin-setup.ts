@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
   CAN,
+  PASSWORD_MIN,
   ROLES,
   STAFF_PASSWORD_MIN,
   type AccountAction,
@@ -16,8 +17,8 @@ import { SETUP_LINK_HOURS, createUser, hashPassword, hashToken } from "./auth";
 import { all, get, newId, now, nowIso, run, tx } from "./db";
 import { AppError, conflict, forbidden, invalid, notFound, requireRole } from "./errors";
 
-/** The first administrator signs everyone else up, so this password gets a higher bar than the general one. */
-export const ADMIN_PASSWORD_MIN = 12;
+/** Passwords typed at the command line (first president, a reset, a committee account): the common minimum. */
+export const ADMIN_PASSWORD_MIN = PASSWORD_MIN;
 
 /**
  * Creates the committee's first administrator account. This is the only way

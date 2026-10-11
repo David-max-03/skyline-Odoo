@@ -30,7 +30,7 @@ export default function ProductPage() {
   }
   if (!product) {
     return (
-      <div role="status" aria-label="Loading product" className="grid gap-6 md:grid-cols-2">
+      <div role="status" aria-label="Loading product" className="grid gap-6 md:grid-cols-[minmax(0,30rem)_minmax(0,1fr)]">
         <Skeleton className="aspect-square" />
         <Skeleton className="h-80" />
       </div>
@@ -61,7 +61,7 @@ export default function ProductPage() {
   return (
     <>
       <PageHeader back={{ href: "/shop", label: "Shop" }} title={product.name} />
-      <div className="grid gap-6 md:grid-cols-2 md:gap-8">
+      <div className="grid gap-6 md:grid-cols-[minmax(0,30rem)_minmax(0,1fr)] md:gap-8 xl:gap-12">
         <div>
           <ProductPhoto url={product.images[photo]?.url ?? product.images[0]?.url} name={product.name} className="aspect-square w-full rounded-card border border-line" />
           {product.images.length > 1 && (

@@ -288,7 +288,7 @@ describe("starting an online application", () => {
   });
 
   it("refuses someone who is already a member or already has a manual application waiting", async () => {
-    await createMember(memberInputSchema.parse({ name: "Existing", email: "applicant1@campus.example", duesPaid: true }), staff.treasurer);
+    await createMember(memberInputSchema.parse({ name: "Existing", email: "applicant1@campus.example", duesPaid: true }), staff.admin);
     expect(await rejection(start(1))).toMatchObject({ code: "already_member" });
 
     await submitApplication(
@@ -300,7 +300,7 @@ describe("starting an online application", () => {
   });
 
   it("refuses a signed-in member, whatever email they give, on both routes", async () => {
-    const member = await createMember(memberInputSchema.parse({ name: "Signed In", email: "signedin@campus.example", duesPaid: true }), staff.treasurer);
+    const member = await createMember(memberInputSchema.parse({ name: "Signed In", email: "signedin@campus.example", duesPaid: true }), staff.admin);
     const session: typeof staff.admin = {
       id: member.id,
       name: member.name,
@@ -727,7 +727,7 @@ describe("conflicts and reconciliation", () => {
     const app = await start();
     const existing = await createMember(
       memberInputSchema.parse({ name: "Added By Hand", email: "applicant1@campus.example", duesPaid: true }),
-      staff.treasurer,
+      staff.admin,
     );
     const payment = razorpay.pay(app.checkout!.orderId);
     const state = await confirm(app, payment);

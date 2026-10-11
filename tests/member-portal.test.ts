@@ -20,7 +20,7 @@ const PASSWORD = "a-long-test-password";
 async function memberAccount(n: number, overrides: Record<string, unknown> = {}): Promise<SessionUser & { memberId: string }> {
   const member = await createMember(
     memberInputSchema.parse({ name: `Member ${n}`, email: `member${n}@campus.example`, duesPaid: true, ...overrides }),
-    staff.treasurer,
+    staff.admin,
   );
   await completeSetup((await createSetupToken(member.id, staff.admin.id)).token, PASSWORD);
   return (await login(member.memberNo, PASSWORD)).user as SessionUser & { memberId: string };

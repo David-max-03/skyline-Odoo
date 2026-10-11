@@ -27,6 +27,7 @@ import {
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
   type ClaimList,
+  type ClaimantOption,
   type ClaimStatus,
   type ExpenseClaim,
   type PaymentMethod,
@@ -129,7 +130,19 @@ function PhotoField({ file, onFile, error }: { file: File | null; onFile: (file:
   );
 }
 
-function ClaimForm({ onSaved, onCancel }: { onSaved: (claim: ExpenseClaim) => void; onCancel: () => void }) {
+function ClaimForm({
+  onSaved,
+  onCancel,
+  canFileForOthers = false,
+}: {
+  onSaved: (claim: ExpenseClaim) => void;
+  onCancel: () => void;
+  /** President only: offer to file the claim for a committee member or volunteer. */
+  canFileForOthers?: boolean;
+}) {
+  // "kind:id" of the person the claim is for; empty means the signed-in account.
+  const [claimant, setClaimant] = useState("");
+  const claimants = useApi<ClaimantOption[]>(canFileForOthers ? "/api/claims/claimants" : null);
   const [values, setValues] = useState({
     title: "",
     amount: "",
@@ -168,6 +181,11 @@ function ClaimForm({ onSaved, onCancel }: { onSaved: (claim: ExpenseClaim) => vo
       form.set("justification", values.justification);
       form.set("notes", values.notes);
       form.set("evidence", photo!);
+      if (claimant) {
+        const [kind, id] = claimant.split(":");
+        form.set("claimantKind", kind);
+        form.set("claimantId", id);
+      }
       onSaved(await api<ExpenseClaim>("/api/claims", { method: "POST", form }));
     } catch (error) {
       setErrors(fieldErrors(error));
@@ -180,7 +198,36 @@ function ClaimForm({ onSaved, onCancel }: { onSaved: (claim: ExpenseClaim) => vo
   return (
     <form onSubmit={submit} noValidate className="space-y-4">
       <FormError message={formError} />
-      <TextField label="What did you buy?" value={values.title} onChange={set("title")} error={errors.title} placeholder="Balloons and tape" required autoFocus />
+      {canFileForOthers && (
+        <SelectField
+          label="Who is this claim for?"
+          value={claimant}
+          onChange={(e) => setClaimant(e.target.value)}
+          error={errors.claimantId ?? errors.claimantKind}
+          hint={
+            claimants.error
+              ? "The list of people could not be loaded. You can still file a claim for yourself."
+              : claimant
+                ? "They are recorded as the claimant and you as the person who filed it. The treasurer reviews it; you cannot approve a claim you filed."
+                : "Choose a committee member or volunteer to file it on their behalf."
+          }
+        >
+          <option value="">Myself</option>
+          {(["staff", "member"] as const).map((kind) => {
+            const people = (claimants.data ?? []).filter((p) => p.kind === kind);
+            return people.length === 0 ? null : (
+              <optgroup key={kind} label={kind === "staff" ? "Committee" : "Volunteers"}>
+                {people.map((p) => (
+                  <option key={p.id} value={`${p.kind}:${p.id}`}>
+                    {p.name} · {p.detail}
+                  </option>
+                ))}
+              </optgroup>
+            );
+          })}
+        </SelectField>
+      )}
+      <TextField label={claimant ? "What did they buy?" : "What did you buy?"} value={values.title} onChange={set("title")} error={errors.title} placeholder="Balloons and tape" required autoFocus />
       <div className="grid gap-4 sm:grid-cols-3">
         <TextField label="Amount" prefix={SYMBOL} inputMode="decimal" value={values.amount} onChange={set("amount")} error={errors.amountCents} placeholder="450" required />
         <TextField label="Date you paid" type="date" max={ymdInTz(new Date())} value={values.spentOn} onChange={set("spentOn")} error={errors.spentOn} required />
@@ -229,7 +276,7 @@ function ClaimDetail({ claim, canReview, onChanged }: { claim: ExpenseClaim; can
   const [formError, setFormError] = useState<string | null>(null);
   const [working, setWorking] = useState<string | null>(null);
   const [imageFailed, setImageFailed] = useState(false);
-  const reviewable = canReview && !claim.isMine;
+  const reviewable = canReview && !claim.isMine && !claim.filedByMe;
   const open = claim.status === "submitted" || claim.status === "under_review";
 
   async function send(body: ReviewBody, message: string) {
@@ -253,7 +300,8 @@ function ClaimDetail({ claim, canReview, onChanged }: { claim: ExpenseClaim; can
         <div className="min-w-0">
           <p className="font-display text-xl font-bold text-ink">{claim.title}</p>
           <p className="text-muted">
-            {claim.claimantName} · {CATEGORY_LABELS[claim.category]} · paid {formatDate(claim.spentOn)}
+            {claim.claimantName}
+            {claim.filedByName && ` (filed by ${claim.filedByName})`} · {CATEGORY_LABELS[claim.category]} · paid {formatDate(claim.spentOn)}
           </p>
         </div>
         <div className="text-right">
@@ -313,6 +361,9 @@ function ClaimDetail({ claim, canReview, onChanged }: { claim: ExpenseClaim; can
 
       {canReview && claim.isMine && claim.status !== "paid" && claim.status !== "rejected" && (
         <Notice tone="neutral">This is your own claim, so the other reviewer has to approve and pay it.</Notice>
+      )}
+      {canReview && claim.filedByMe && claim.status !== "paid" && claim.status !== "rejected" && (
+        <Notice tone="neutral">You filed this claim for {claim.claimantName}, so the other reviewer has to approve and pay it.</Notice>
       )}
 
       {reviewable && open && mode === "view" && (
@@ -427,6 +478,7 @@ export function ClaimsBoard({ description }: { description: string }) {
                       <span className="block text-[0.9375rem] font-semibold text-ink">{claim.title}</span>
                       <span className="block text-[0.8125rem] text-muted">
                         {data.canReview && `${claim.claimantName}${claim.isMine ? " (you)" : ""} · `}
+                        {claim.filedByName && `filed by ${claim.filedByName} · `}
                         {CATEGORY_LABELS[claim.category]} · paid {formatDate(claim.spentOn)} · <span className="font-mono">{claim.code}</span>
                       </span>
                       {claim.status === "rejected" && claim.reviewNote && <span className="mt-1 block text-[0.8125rem] text-bad">{claim.reviewNote}</span>}
@@ -446,10 +498,15 @@ export function ClaimsBoard({ description }: { description: string }) {
       <Dialog open={adding} onClose={() => setAdding(false)} title="New expense claim" description="A photo of the receipt is required." size="lg">
         {adding && (
           <ClaimForm
+            canFileForOthers={data?.canFileForOthers ?? false}
             onCancel={() => setAdding(false)}
             onSaved={(claim) => {
               setAdding(false);
-              toast.success(`Claim ${claim.code} sent to the treasurer.`);
+              toast.success(
+                claim.filedByMe
+                  ? `Claim ${claim.code} filed for ${claim.claimantName} and sent to the treasurer.`
+                  : `Claim ${claim.code} sent to the treasurer.`,
+              );
               reload();
             }}
           />

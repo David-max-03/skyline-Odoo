@@ -40,6 +40,11 @@ export default function CommitteeSetupPage() {
   async function submit(e: FormEvent) {
     e.preventDefault();
     setFormError(null);
+    // The server checks this again; saying so here saves a round trip.
+    if (password.length < STAFF_PASSWORD_MIN) {
+      setErrors({ password: `Use at least ${STAFF_PASSWORD_MIN} characters` });
+      return;
+    }
     if (password !== confirm) {
       setErrors({ confirm: "The two passwords do not match" });
       return;
@@ -108,6 +113,7 @@ export default function CommitteeSetupPage() {
                   onChange={(e) => setPassword(e.target.value)}
                   error={errors.password}
                   hint={`At least ${STAFF_PASSWORD_MIN} characters. A few unrelated words work well.`}
+                  minLength={STAFF_PASSWORD_MIN}
                   required
                   autoFocus
                 />

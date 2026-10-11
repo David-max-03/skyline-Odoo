@@ -4,7 +4,7 @@ import Link from "next/link";
 import { ArrowRight, CalendarDays, MapPin, Megaphone, Shirt, UserPlus } from "lucide-react";
 import { Money } from "@/components/domain";
 import { PublicShell } from "@/components/public-shell";
-import { Badge, Card, EmptyState, ErrorState, LinkButton, Skeleton, cn } from "@/components/ui";
+import { Badge, Card, EmptyState, ErrorState, LinkButton, Skeleton } from "@/components/ui";
 import { useApi } from "@/lib/api-client";
 import { SETTINGS, type PublicAnnouncement, type PublicEvent } from "@/lib/contracts";
 import { formatDateTime } from "@/lib/dates";
@@ -17,7 +17,7 @@ export default function HomePage() {
   return (
     <PublicShell>
       {/* Spacing on this page is set here, not in the shared shell, so no other page moves. */}
-      <section className="-mt-3 grid items-center gap-6 rounded-card bg-night px-5 py-7 sm:-mt-4 sm:px-8 sm:py-9 lg:grid-cols-[minmax(0,1fr)_19rem]">
+      <section className="grid items-center gap-6 rounded-card bg-night px-5 py-7 sm:px-8 sm:py-9 lg:grid-cols-[minmax(0,1fr)_minmax(19rem,24rem)] xl:px-12 xl:py-12">
         <div>
         <p className="text-[0.8125rem] font-semibold uppercase tracking-wider text-accent">{SETTINGS.orgName}</p>
         <h1 className="mt-2 max-w-2xl text-[1.75rem] font-extrabold leading-tight !text-white sm:text-[2.35rem] sm:leading-[1.1]">
@@ -79,7 +79,7 @@ export default function HomePage() {
           </span>
           <span className="min-w-0 flex-1">
             <span className="block text-sm font-semibold text-ink">{latest.title}</span>
-            <span className="line-clamp-1 block text-[0.8125rem] text-muted">{latest.body}</span>
+            <span className="line-clamp-2 text-[0.8125rem] text-muted sm:line-clamp-1">{latest.body}</span>
           </span>
           <ArrowRight className="size-4 shrink-0 text-subtle" aria-hidden />
         </Link>
@@ -99,7 +99,7 @@ export default function HomePage() {
             <ErrorState message={events.error.message} onRetry={events.reload} />
           </Card>
         ) : !events.data ? (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" role="status" aria-label="Loading events">
+          <div className="grid gap-3 sm:grid-cols-[repeat(auto-fit,minmax(18rem,1fr))]" role="status" aria-label="Loading events">
             {[0, 1, 2].map((i) => (
               <Skeleton key={i} className="h-32" />
             ))}
@@ -109,8 +109,8 @@ export default function HomePage() {
             <EmptyState icon={CalendarDays} title="Nothing scheduled right now" description="Check back soon, or read the news board for updates." />
           </Card>
         ) : (
-          <div className={cn("grid gap-3 sm:grid-cols-2", events.data.length >= 3 && "lg:grid-cols-3")}>
-            {events.data.slice(0, 3).map((event) => (
+          <div className="grid gap-3 sm:grid-cols-[repeat(auto-fit,minmax(18rem,1fr))]">
+            {events.data.slice(0, 4).map((event) => (
               <Link
                 key={event.id}
                 href={`/events/${event.id}`}

@@ -39,6 +39,11 @@ export default function ActivatePage() {
   async function submit(e: FormEvent) {
     e.preventDefault();
     setFormError(null);
+    // The server checks this again; saying so here saves a round trip.
+    if (password.length < MEMBER_PASSWORD_MIN) {
+      setErrors({ password: `Use at least ${MEMBER_PASSWORD_MIN} characters` });
+      return;
+    }
     if (password !== confirm) {
       setErrors({ confirm: "The two passwords do not match" });
       return;
@@ -107,6 +112,7 @@ export default function ActivatePage() {
                   onChange={(e) => setPassword(e.target.value)}
                   error={errors.password}
                   hint={`At least ${MEMBER_PASSWORD_MIN} characters. A few unrelated words work well.`}
+                  minLength={MEMBER_PASSWORD_MIN}
                   required
                   autoFocus
                 />

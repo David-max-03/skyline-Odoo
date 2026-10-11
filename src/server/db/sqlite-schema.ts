@@ -536,6 +536,15 @@ CREATE TABLE staff_setup_tokens (
 CREATE INDEX staff_setup_tokens_user ON staff_setup_tokens(user_id);
 `;
 
+/**
+ * Version 12: the president can file an expense claim for someone else.
+ * `filed_by` is the account that entered the claim when that is not the
+ * claimant. Null on every existing claim, which means "filed by the claimant".
+ */
+const SCHEMA_V12 = `
+ALTER TABLE expense_claims ADD COLUMN filed_by TEXT REFERENCES users(id);
+`;
+
 /** Applied in order; `PRAGMA user_version` records how many have run. */
 export const SQLITE_MIGRATIONS = [
   SCHEMA_V1,
@@ -549,4 +558,5 @@ export const SQLITE_MIGRATIONS = [
   SCHEMA_V9,
   SCHEMA_V10,
   SCHEMA_V11,
+  SCHEMA_V12,
 ];

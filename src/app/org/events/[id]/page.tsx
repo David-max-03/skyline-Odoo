@@ -68,6 +68,7 @@ export default function EventDetailPage() {
   const canCollect = useCan("collectPayment");
   const canRefund = useCan("processRefunds");
   const canCancelEvent = useCan("cancelEvents");
+  const canCheckIn = useCan("checkIn");
   const detail = useApi<EventDetailView>(`/api/events/${id}`);
   // The ledger is for the president and the treasurer; the server refuses anyone else.
   const ledger = useApi<Transaction[]>(canFinance ? `/api/transactions?eventId=${id}` : null);
@@ -199,7 +200,7 @@ export default function EventDetailPage() {
                 Publish
               </Button>
             )}
-            {event.status === "published" && (
+            {canCheckIn && event.status === "published" && (
               <LinkButton href={`/org/check-in?event=${event.id}`} icon={ScanLine} className="max-sm:order-first max-sm:w-full">
                 Check-in
               </LinkButton>

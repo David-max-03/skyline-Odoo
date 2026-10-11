@@ -40,7 +40,7 @@ const tx = (overrides: Partial<TransactionInput>): TransactionInput =>
 
 // The organizer runs the door; taking money at the door is the treasurer's job.
 const scan = (code: string, extra: Record<string, unknown> = {}) =>
-  checkIn({ code, eventId: null, collectPayment: false, method: "cash", ...extra }, extra.collectPayment ? staff.treasurer : staff.organizer);
+  checkIn({ code, eventId: null, collectPayment: false, method: "cash", ...extra }, extra.collectPayment ? staff.admin : staff.organizer);
 
 describe("money helpers", () => {
   it("parses typed amounts into minor units without float error", () => {

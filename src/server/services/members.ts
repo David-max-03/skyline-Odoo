@@ -1,4 +1,5 @@
 import {
+  CAN,
   SETTINGS,
   type Member,
   type MemberDetail,
@@ -142,10 +143,12 @@ export async function getMember(id: string): Promise<MemberDetail> {
   }>(
     `SELECT o.code, p.name, v.size, o.quantity, o.total_cents, o.payment_status, o.status, o.created_at
      FROM orders o JOIN products p ON p.id = o.product_id JOIN product_variants v ON v.id = o.variant_id
-     WHERE o.member_id = ? OR o.buyer_email = ?
+       LEFT JOIN checkouts c ON c.id = o.checkout_id
+     -- Theirs by record (their account, or a proven membership), never by a typed email. See merch.ts.
+     WHERE o.member_id = ? OR c.member_id = ?
      ORDER BY o.created_at DESC`,
     id,
-    member.email,
+    id,
   )).map((o) => ({
     code: o.code,
     productName: o.name,
@@ -264,7 +267,7 @@ async function insertMember(
 
 /** Staff adds a member, optionally recording dues as collected. */
 export async function createMember(input: MemberInput, actor: SessionUser | null): Promise<Member> {
-  const user = requireRole(actor, "admin", "treasurer");
+  const user = requireRole(actor, ...CAN.addMembers);
   return tx(async () => {
     const id = await insertMember(input, {
       paid: input.duesPaid,

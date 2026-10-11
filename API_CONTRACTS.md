@@ -53,8 +53,8 @@ and no local file is used as a fallback.
 | `PATCH /api/events/:id` | A, O | `eventInputSchema` | `EventView` |
 | `POST /api/events/:id/status` | A, O (`cancelled`: A only) | `{ status }` | `EventStatusChange` |
 | `POST /api/events/:id/registrations` | staff (`payNow`: A, T) | `staffRegistrationSchema` | `Ticket` |
-| `POST /api/tickets/verify` | staff | `{ code, eventId? }` | `CheckInResult` (no change made) |
-| `POST /api/tickets/check-in` | staff | `checkInSchema` | `CheckInResult` |
+| `POST /api/tickets/verify` | A, O | `{ code, eventId? }` | `CheckInResult` (no change made) |
+| `POST /api/tickets/check-in` | A, O | `checkInSchema` | `CheckInResult` |
 | `POST /api/tickets/:code` | staff¹ | `{ action: "pay" \| "cancel" \| "undo_check_in", method? }` | `{ ticket, refundDueCents }` |
 
 ¹ `pay`: A, T. `cancel`: A, O for an unpaid or free ticket; A only for a paid one, because that records a refund. `undo_check_in`: A, O.
@@ -98,7 +98,7 @@ entries can be edited; `manual` and `refund` entries can be voided. Settling a `
 | Method and path | Access | Body | Returns |
 |---|---|---|---|
 | `GET /api/members` | A, T | — | `Member[]` |
-| `POST /api/members` | A, T | `memberInputSchema` | `Member` |
+| `POST /api/members` | A | `memberInputSchema` | `Member`. Adding a member by hand is the president's; the treasurer admits members by reviewing applications |
 | `GET /api/members/:id` | A, T | — | `MemberDetail` (terms, tickets, orders) |
 | `PATCH /api/members/:id` | A, T | `memberUpdateSchema` | `Member` |
 | `POST /api/members/:id` | A, T | `{ action: "renew" \| "collect_dues", duesPaid?, method? }` | `Member` |
@@ -109,9 +109,9 @@ entries can be edited; `manual` and `refund` entries can be voided. Settling a `
 
 | Method and path | Access | Body | Returns |
 |---|---|---|---|
-| `GET /api/tasks` · `POST /api/tasks` | staff | `taskInputSchema` | `Task[]` · `Task` |
-| `PUT /api/tasks/:id` | staff | `taskInputSchema` | `Task` |
-| `PATCH /api/tasks/:id` | staff | `{ action: "start" \| "done" \| "reopen" }` | `Task`; 409 `invalid_transition` if the action does not fit the current status |
+| `GET /api/tasks` · `POST /api/tasks` | A, O | `taskInputSchema` | `Task[]` · `Task` |
+| `PUT /api/tasks/:id` | A, O | `taskInputSchema` | `Task` |
+| `PATCH /api/tasks/:id` | A, O | `{ action: "start" \| "done" \| "reopen" }` | `Task`; 409 `invalid_transition` if the action does not fit the current status |
 | `GET /api/me/tasks` | member | — | `Task[]` assigned to the signed-in member |
 | `PATCH /api/me/tasks/:id` | member | `{ action }` | `Task`; 404 for any task not assigned to them |
 | `DELETE /api/tasks/:id` | A, O | — | `{ ok }` |
@@ -203,7 +203,7 @@ approved volunteer sees the task in `GET /api/me/tasks` and may progress it like
 | `POST /api/products/:id/images` | A, T | multipart, file `image` | `Product` |
 | `DELETE /api/products/:id/images/:imageId` | A, T | — | `Product` |
 | `POST /api/products/:id/variants` | A, T | `{ size, stock }` | `Product` |
-| `POST /api/me/orders/:code/pay` | member | `orderPaymentActionSchema`: `start`, `confirm` (Checkout result), `check`, `failed`. No amount is accepted | `OrderPaymentState`. The order is paid only after the server verifies the payment with Razorpay. `404` for an order that is not the member's |
+| `POST /api/me/orders/:code/pay` | member, or a committee account linked to a member record | `orderPaymentActionSchema`: `start`, `confirm` (Checkout result), `check`, `failed`. No amount is accepted | `OrderPaymentState`. The order is paid only after the server verifies the payment with Razorpay. `404` for an order that is not the member's |
 | `GET /api/order-payments` | A, T | — | `OrderPaymentRecord[]` (online merchandise payments; those needing a refund first) |
 | `POST /api/order-payments/:id` | A | `{ action: "refunded", note }` | `OrderPaymentRecord` |
 
@@ -219,7 +219,10 @@ existing `POST /api/orders/:id`. `productInputSchema` and `productUpdateSchema` 
 |---|---|---|---|
 | `GET /api/claims` | any signed-in account | — | `ClaimList`: all claims for A and T, own claims otherwise |
 | `POST /api/claims` | staff, and members with an assigned task | multipart: `claimInputSchema` fields + file `evidence` (required) | `ExpenseClaim` |
+| `GET /api/claims/claimants` | A | — | `ClaimantOption[]`: active committee accounts other than the caller, and members who volunteer |
 | `POST /api/claims/:id` | A, T, never the claimant | `{ action: "start_review" }`, `{ action: "approve", note? }`, `{ action: "reject", reason }` or `{ action: "pay", method }` | `ExpenseClaim` |
+
+The president may add `claimantKind` (`staff` or `member`) and `claimantId` to `POST /api/claims` to file a claim on someone's behalf. The server checks the role (403 for anyone else), that the person exists and may claim (422 otherwise), and takes the claimant's name from their record. The claim stores the claimant as usual and the president in `filed_by`; the president cannot then review it.
 
 `GET /api/files/:id` serves a receipt to A, T and the claimant only. `POST
 /api/transactions` is now A and T only: organizers file claims instead.
@@ -234,7 +237,7 @@ existing `POST /api/orders/:id`. `productInputSchema` and `productUpdateSchema` 
 | `PATCH /api/accounts/:id` | A | `{ role }` | `CommitteeAccount`; every session of the account is ended |
 | `POST /api/accounts/:id/setup-link` | A | — | `CommitteeSetupLink` (a new one-time password link; cancels an earlier unused one). `403` for another president who already has a password; `409` for one's own or a disabled account |
 | `POST /api/auth/staff-setup/check` | public | `{ token }` | `StaffSetupInfo` (name, email, role, expiry). Changes nothing |
-| `POST /api/auth/staff-setup` | public | `{ token, password }` (at least 12 characters) | `{ email }`. The link stops working |
+| `POST /api/auth/staff-setup` | public | `{ token, password }` (at least 8 characters) | `{ email }`. The link stops working |
 
 No password is ever chosen or shown by the president. A new account is stored unable to
 sign in, and `setupLink.path` (`/committee-setup/<token>`) is returned once; only the
@@ -263,13 +266,15 @@ never deleted. The first president is still created from the command line (`admi
 | Member records (list, one member, addresses) | yes | yes | no |
 | Ledger, finance summary, event income and costs, break-even | yes | yes | no |
 | Orders, order payments, online membership payments, applications | yes | yes | no |
-| Events, registrations, ticket payment status, tasks, volunteer requests | yes | yes¹ | yes |
+| Events, registrations, ticket payment status | yes | yes | yes |
+| Volunteer tasks and volunteer requests | yes | no | yes |
+| Check-in at the door; volunteer tasks | yes | no | yes |
+| Adding a member by hand | yes | no | no |
 | Recording a ticket payment | yes | yes | no |
 | Cancelling a paid ticket or a paid merchandise order; paying out or voiding any refund; marking an online order payment refunded | yes | no | no |
 | Cancelling a whole event | yes | no | no |
 | Committee accounts | yes | no | no |
 
-¹ The treasurer reads events and tasks but does not approve volunteer requests.
 The staff routes that send this data read it through `src/server/services/staff-views.ts`,
 which checks the role again whatever the route declared.
 

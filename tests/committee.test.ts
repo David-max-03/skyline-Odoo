@@ -59,7 +59,7 @@ const memberRecords = async () => ({
 
 beforeEach(async () => {
   staff = await freshDb();
-  member = await createMember(memberInputSchema.parse({ name: "Mira Member", email: "mira@campus.example", duesPaid: true }), staff.treasurer);
+  member = await createMember(memberInputSchema.parse({ name: "Mira Member", email: "mira@campus.example", duesPaid: true }), staff.admin);
 });
 
 describe("adding a committee account", () => {
@@ -203,7 +203,7 @@ describe("promoting an existing member", () => {
     expect((await appError(() => invite({ role: "treasurer", memberId: member.id }))).code).toBe("already_committee");
     expect((await appError(() => invite({ role: "treasurer", memberId: "mem_missing" }))).status).toBe(404);
 
-    const other = await createMember(memberInputSchema.parse({ name: "Noor Member", email: "noor@campus.example" }), staff.treasurer);
+    const other = await createMember(memberInputSchema.parse({ name: "Noor Member", email: "noor@campus.example" }), staff.admin);
     const refused = await appError(() => invite({ role: "treasurer", name: "Noor Member", email: "NOOR@campus.example" }));
     expect(refused).toMatchObject({ status: 409, code: "member_email" });
     expect(refused.message).toContain(other.memberNo);

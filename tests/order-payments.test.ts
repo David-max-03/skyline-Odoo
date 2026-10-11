@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  accountCreateSchema,
   checkoutInputSchema,
   memberInputSchema,
+  shopperMember,
   orderPaymentActionSchema,
   productInputSchema,
   type Member,
@@ -9,6 +11,8 @@ import {
   type Product,
   type ShopOrder,
 } from "@/lib/contracts";
+import { completeStaffSetup, inviteCommitteeAccount, setCommitteeAccountStatus } from "@/server/admin-setup";
+import { getSessionUser, login } from "@/server/auth";
 import { all, get } from "@/server/db";
 import { AppError } from "@/server/errors";
 import { signCheckout, signWebhook, type GatewayPayment } from "@/server/razorpay";
@@ -30,7 +34,7 @@ let buyer: Member;
 let other: Member;
 
 const member = (n: number) =>
-  createMember(memberInputSchema.parse({ name: `Member ${n}`, email: `member${n}@campus.example`, duesPaid: true }), staff.treasurer);
+  createMember(memberInputSchema.parse({ name: `Member ${n}`, email: `member${n}@campus.example`, duesPaid: true }), staff.admin);
 const size = (p: Product, s: string) => p.variants.find((v) => v.size === s)!.id;
 
 beforeEach(async () => {
@@ -529,5 +533,141 @@ describe("manual and online payment together", () => {
     await confirm(order, state, razorpay.pay(state.checkout!.orderId));
     expect((await getProduct(hoodie.id)).variants.map((v) => v.stock)).toEqual(stock);
     expect(await mine(other)).toMatchObject({ code: theirs.code, unpaidCents: 300000 });
+  });
+});
+
+/**
+ * A committee account is not a member account, so on its own it shops as a
+ * guest and pays on collection. One that was given to an existing member is
+ * linked to that member's record, and orders and pays online as that member.
+ */
+describe("a committee account buying merchandise", () => {
+  const PASSWORD = "four unrelated words";
+
+  /** Makes `who` a treasurer through the president's page and signs that account in. */
+  async function linkedTreasurer(who: Member) {
+    const { account, setupLink } = await inviteCommitteeAccount(accountCreateSchema.parse({ role: "treasurer", memberId: who.id }), staff.admin);
+    await completeStaffSetup(setupLink.path.split("/").pop()!, PASSWORD);
+    const session = await login(who.email, PASSWORD);
+    return { account, session };
+  }
+
+  it("shops as nobody when it has no member record: no member checkout, no online payment", async () => {
+    const session = await login("treasurer@test.example", "password-1");
+    expect(session.user).toMatchObject({ role: "treasurer", memberId: null });
+    expect(shopperMember(session.user)).toBeNull();
+    expect(shopperMember(await getSessionUser(session.token))).toBeNull();
+    // As a guest, the order is unpaid at the standard price and cannot be paid online.
+    const guest = await checkout(checkoutInputSchema.parse({ items: [{ variantId: size(hoodie, "M"), quantity: 1 }], name: "Treasurer", email: "treasurer@test.example", memberNo: null }));
+    expect(guest).toMatchObject({ totalCents: 120000, unpaidCents: 120000, isMember: false, payOnline: false });
+  });
+
+  it("shops as the member it is linked to, and stays a committee session", async () => {
+    const { session } = await linkedTreasurer(buyer);
+    const user = (await getSessionUser(session.token))!;
+    expect(user).toMatchObject({ role: "treasurer", memberId: null, memberNo: null, linkedMemberId: buyer.id, linkedMemberNo: buyer.memberNo });
+    expect(shopperMember(user)).toEqual({ id: buyer.id, memberNo: buyer.memberNo });
+    // Nobody else's record: the link is read from the account, not from anything the browser sends.
+    expect(shopperMember(user)!.id).not.toBe(other.id);
+  });
+
+  it("pays its own order online: member price, exact amount, paid once after verification", async () => {
+    const { session } = await linkedTreasurer(buyer);
+    const shopper = shopperMember((await getSessionUser(session.token))!)!;
+    const stockBefore = (await getProduct(hoodie.id)).variants.find((v) => v.size === "M")!.stock;
+
+    const order = await checkoutAsMember([{ variantId: size(hoodie, "M"), quantity: 2 }], shopper.id);
+    expect(order).toMatchObject({ totalCents: 200000, unpaidCents: 200000, isMember: true, payOnline: true });
+    expect((await getProduct(hoodie.id)).variants.find((v) => v.size === "M")!.stock).toBe(stockBefore - 2);
+
+    const state = await orderPaymentAction(shopper.id, order.code, { action: "start" });
+    expect(state.checkout).toMatchObject({ amountCents: 200000, currency: "INR", keyId: KEY_ID });
+    expect(razorpay.orders.find((o) => o.id === state.checkout!.orderId)?.amountCents).toBe(200000);
+
+    // Another member cannot start or confirm it.
+    expect((await thrown(() => orderPaymentAction(other.id, order.code, { action: "start" }))).status).toBe(404);
+
+    const payment = razorpay.pay(state.checkout!.orderId);
+    // A forged signature marks nothing paid.
+    expect(await rejection(confirm(order, state, payment, buyer, "0".repeat(64)))).toMatchObject({ code: "payment_unverified", status: 400 });
+    await nothingPaid();
+
+    const paid = await confirm(order, state, payment);
+    expect(paid.order).toMatchObject({ unpaidCents: 0, payOnline: false });
+    expect(await settledMerch()).toHaveLength(1);
+    expect((await settledMerch())[0].amountCents).toBe(200000);
+
+    // The webhook for the same payment, twice over, changes nothing: one ledger entry, stock taken once.
+    await webhook("payment.captured", payment, "evt_staff_1");
+    expect((await webhook("payment.captured", payment, "evt_staff_1")).outcome).toBe("duplicate");
+    expect(await settledMerch()).toHaveLength(1);
+    expect((await getProduct(hoodie.id)).variants.find((v) => v.size === "M")!.stock).toBe(stockBefore - 2);
+  });
+
+  it("is not marked paid by a failed or abandoned payment", async () => {
+    const { session } = await linkedTreasurer(buyer);
+    const shopper = shopperMember((await getSessionUser(session.token))!)!;
+    const order = await checkoutAsMember([{ variantId: size(hoodie, "M"), quantity: 1 }], shopper.id);
+    const state = await orderPaymentAction(shopper.id, order.code, { action: "start" });
+
+    // Abandoned: Checkout was closed without paying.
+    const abandoned = await orderPaymentAction(shopper.id, order.code, { action: "check" });
+    expect(abandoned.order.unpaidCents).toBe(100000);
+    // Failed at the bank.
+    const failed = razorpay.pay(state.checkout!.orderId, { status: "failed" });
+    await webhook("payment.failed", failed);
+    await nothingPaid();
+    expect((await mine()).unpaidCents).toBe(100000);
+  });
+
+  it("gets the standard price when the linked member's membership is not active, and no discount is invented", async () => {
+    const unpaid = await createMember(memberInputSchema.parse({ name: "Uma Unpaid", email: "uma@campus.example", duesPaid: false }), staff.admin);
+    const { session } = await linkedTreasurer(unpaid);
+    const shopper = shopperMember((await getSessionUser(session.token))!)!;
+    const order = await checkoutAsMember([{ variantId: size(hoodie, "M"), quantity: 1 }], shopper.id);
+    expect(order).toMatchObject({ totalCents: 120000, isMember: false });
+  });
+
+  it("cannot oversell: the last unit goes to one buyer", async () => {
+    const { session } = await linkedTreasurer(buyer);
+    const shopper = shopperMember((await getSessionUser(session.token))!)!;
+    const left = (await getProduct(hoodie.id)).variants.find((v) => v.size === "M")!.stock;
+    const results = await Promise.allSettled([
+      checkoutAsMember([{ variantId: size(hoodie, "M"), quantity: left }], shopper.id),
+      checkoutAsMember([{ variantId: size(hoodie, "M"), quantity: 1 }], other.id),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect((await getProduct(hoodie.id)).variants.find((v) => v.size === "M")!.stock).toBeGreaterThanOrEqual(0);
+  });
+
+  it("can no longer order or pay as the member once the committee account is disabled", async () => {
+    const { account, session } = await linkedTreasurer(buyer);
+    await setCommitteeAccountStatus(account.id, "disable", staff.admin);
+    // No session, so no member to shop as. (Guest checkout stays open to everyone, as for any visitor.)
+    expect(await getSessionUser(session.token)).toBeNull();
+    expect(shopperMember(await getSessionUser(session.token))).toBeNull();
+    // The member's own record and orders are untouched.
+    expect((await getMember(buyer.id)).memberNo).toBe(buyer.memberNo);
+  });
+
+  it("sees exactly the orders the member sees, including one placed while the membership was not active", async () => {
+    const unpaid = await createMember(memberInputSchema.parse({ name: "Ira Inactive", email: "ira@campus.example", duesPaid: false }), staff.admin);
+    const { session } = await linkedTreasurer(unpaid);
+    const shopper = shopperMember((await getSessionUser(session.token))!)!;
+    const order = await checkoutAsMember([{ variantId: size(hoodie, "L"), quantity: 1 }], shopper.id);
+    expect((await listMemberOrders(shopper.id)).map((o) => o.code)).toEqual([order.code]);
+    // Still payable online at the standard price, and never another member's.
+    const state = await orderPaymentAction(shopper.id, order.code, { action: "start" });
+    expect(state.checkout).toMatchObject({ amountCents: 120000 });
+    expect(await listMemberOrders(other.id)).toEqual([]);
+    expect((await thrown(() => orderPaymentAction(other.id, order.code, { action: "start" }))).status).toBe(404);
+  });
+
+  it("leaves an ordinary member's online payment exactly as it was", async () => {
+    const order = await twoLineOrder(other);
+    const state = await start(order, other);
+    const paid = await confirm(order, state, razorpay.pay(state.checkout!.orderId), other);
+    expect(paid.order.unpaidCents).toBe(0);
+    expect(shopperMember({ id: other.id, name: other.name, email: other.email, role: "member", memberId: other.id, memberNo: other.memberNo })).toEqual({ id: other.id, memberNo: other.memberNo });
   });
 });

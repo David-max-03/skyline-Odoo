@@ -1,12 +1,17 @@
-import type {
-  ClaimAccess,
-  ClaimCategory,
-  ClaimInput,
-  ClaimList,
-  ClaimReviewInput,
-  ClaimStatus,
-  ExpenseClaim,
-  SessionUser,
+import {
+  CAN,
+  ROLE_LABELS,
+  can,
+  type ClaimAccess,
+  type ClaimCategory,
+  type ClaimInput,
+  type ClaimList,
+  type ClaimReviewInput,
+  type ClaimStatus,
+  type ClaimantOption,
+  type ExpenseClaim,
+  type Role,
+  type SessionUser,
 } from "@/lib/contracts";
 import { all, get, newId, nowIso, randomCode, run, today, tx } from "../db";
 import { conflict, forbidden, invalid, notFound, requireRole, unauthorized } from "../errors";
@@ -44,15 +49,19 @@ interface ClaimRow {
   reviewed_at: string | null;
   transaction_id: string | null;
   created_at: string;
+  /** The account that entered the claim for the claimant; null when the claimant filed it. */
+  filed_by: string | null;
   event_title: string | null;
   reviewed_by_name: string | null;
+  filed_by_name: string | null;
 }
 
 const SELECT = `
-  SELECT c.*, e.title AS event_title, u.name AS reviewed_by_name
+  SELECT c.*, e.title AS event_title, u.name AS reviewed_by_name, f.name AS filed_by_name
   FROM expense_claims c
   LEFT JOIN events e ON e.id = c.event_id
-  LEFT JOIN users u ON u.id = c.reviewed_by`;
+  LEFT JOIN users u ON u.id = c.reviewed_by
+  LEFT JOIN users f ON f.id = c.filed_by`;
 
 const isReviewer = (actor: SessionUser) => actor.role === "admin" || actor.role === "treasurer";
 
@@ -70,6 +79,8 @@ function toClaim(r: ClaimRow, actor: SessionUser): ExpenseClaim {
     claimantName: r.claimant_name,
     claimantKind: r.claimant_member_id ? "member" : "staff",
     isMine: isClaimant(r, actor),
+    filedByName: r.filed_by_name,
+    filedByMe: r.filed_by !== null && actor.role !== "member" && r.filed_by === actor.id,
     title: r.title,
     justification: r.justification,
     notes: r.notes,
@@ -94,18 +105,93 @@ function toClaim(r: ClaimRow, actor: SessionUser): ExpenseClaim {
  */
 export async function claimAccess(actor: SessionUser | null): Promise<ClaimAccess> {
   if (!actor) throw unauthorized();
-  if (actor.role !== "member") return { canSubmit: true, canReview: isReviewer(actor), reason: null };
+  if (actor.role !== "member") {
+    return { canSubmit: true, canReview: isReviewer(actor), canFileForOthers: can(actor, "fileClaimForOthers"), reason: null };
+  }
   const volunteer = !!await get("SELECT 1 FROM tasks WHERE assignee_member_id = ? LIMIT 1", actor.memberId);
   return {
     canSubmit: volunteer,
     canReview: false,
+    canFileForOthers: false,
     reason: volunteer ? null : "Expense claims are for volunteers. Once the committee assigns you a task, you can claim what you spend on it.",
   };
+}
+
+/** A member is a volunteer, and so may claim, once the committee has assigned them a task. */
+const VOLUNTEER = "EXISTS (SELECT 1 FROM tasks t WHERE t.assignee_member_id = m.id)";
+
+/**
+ * The people the president may file a claim for: active committee accounts
+ * other than their own, and members who volunteer. The same rule decides who
+ * may claim for themselves.
+ */
+export async function listClaimants(actor: SessionUser | null): Promise<ClaimantOption[]> {
+  const user = requireRole(actor, ...CAN.fileClaimForOthers);
+  const staff = await all<{ id: string; name: string; role: Role }>(
+    "SELECT id, name, role FROM users WHERE disabled_at IS NULL AND id <> ? ORDER BY name, id",
+    user.id,
+  );
+  const volunteers = await all<{ id: string; name: string; member_no: string }>(
+    `SELECT m.id, m.name, m.member_no FROM members m WHERE ${VOLUNTEER} ORDER BY m.name, m.id`,
+  );
+  return [
+    ...staff.map((s) => ({ kind: "staff" as const, id: s.id, name: s.name, detail: ROLE_LABELS[s.role] })),
+    ...volunteers.map((v) => ({ kind: "member" as const, id: v.id, name: v.name, detail: v.member_no })),
+  ];
+}
+
+interface Claimant {
+  memberId: string | null;
+  userId: string | null;
+  name: string;
+  /** The account that entered the claim, when it is not the claimant. */
+  filedBy: string | null;
+}
+
+/**
+ * Who the claim is for. Without a choice it is the signed-in account, as it
+ * always was. With one, the caller must be the president and the chosen person
+ * must exist and be allowed to claim: the name stored comes from their record,
+ * never from the request.
+ */
+async function resolveClaimant(input: ClaimInput, user: SessionUser): Promise<Claimant> {
+  if (!input.claimantKind && !input.claimantId) {
+    return {
+      memberId: user.role === "member" ? user.memberId : null,
+      userId: user.role === "member" ? null : user.id,
+      name: user.name,
+      filedBy: null,
+    };
+  }
+  requireRole(user, ...CAN.fileClaimForOthers);
+  if (!input.claimantKind || !input.claimantId) {
+    throw invalid("Choose who the claim is for.", { claimantId: "Choose who the claim is for" });
+  }
+  const unknown = () => invalid("Choose who the claim is for.", { claimantId: "This person cannot be found or cannot claim expenses" });
+  if (input.claimantKind === "staff") {
+    if (input.claimantId === user.id) {
+      throw invalid("Choose someone else.", { claimantId: "To claim for yourself, leave this on \"Myself\"" });
+    }
+    const staff = await get<{ id: string; name: string }>(
+      "SELECT id, name FROM users WHERE id = ? AND disabled_at IS NULL",
+      input.claimantId,
+    );
+    if (!staff) throw unknown();
+    return { memberId: null, userId: staff.id, name: staff.name, filedBy: user.id };
+  }
+  const member = await get<{ id: string; name: string }>(
+    `SELECT m.id, m.name FROM members m WHERE m.id = ? AND ${VOLUNTEER}`,
+    input.claimantId,
+  );
+  if (!member) throw unknown();
+  return { memberId: member.id, userId: null, name: member.name, filedBy: user.id };
 }
 
 export async function submitClaim(input: ClaimInput, evidence: Buffer | null, actor: SessionUser | null): Promise<ExpenseClaim> {
   const access = await claimAccess(actor);
   const user = actor!;
+  // A role that may not file for others is refused outright if it names a claimant, before anything else.
+  if ((input.claimantKind || input.claimantId) && !access.canFileForOthers) throw forbidden();
   if (!access.canSubmit) throw forbidden(access.reason ?? undefined);
   if (!evidence) {
     throw invalid("Add a photo of the receipt.", { evidence: "A photo of the receipt or bill is required" });
@@ -120,6 +206,8 @@ export async function submitClaim(input: ClaimInput, evidence: Buffer | null, ac
   let fileId = null as string | null;
   try {
     return tx(async () => {
+      // Inside the transaction, so the person chosen still exists and may claim when the row is written.
+      const claimant = await resolveClaimant(input, user);
       fileId = await storeImage(evidence, "claim_receipt");
       const id = newId("clm");
       let code = `CLM-${randomCode(6)}`;
@@ -127,14 +215,14 @@ export async function submitClaim(input: ClaimInput, evidence: Buffer | null, ac
       await run(
         `INSERT INTO expense_claims
            (id, code, claimant_member_id, claimant_user_id, claimant_name, title, justification, notes,
-            category, amount_cents, spent_on, event_id, evidence_file_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?)`,
+            category, amount_cents, spent_on, event_id, evidence_file_id, status, created_at, filed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)`,
         id,
         code,
-        // The claimant is always the signed-in account, never a value from the form.
-        user.role === "member" ? user.memberId : null,
-        user.role === "member" ? null : user.id,
-        user.name,
+        // The signed-in account, or the person the president chose and the server checked.
+        claimant.memberId,
+        claimant.userId,
+        claimant.name,
         input.title,
         input.justification,
         input.notes,
@@ -144,6 +232,7 @@ export async function submitClaim(input: ClaimInput, evidence: Buffer | null, ac
         input.eventId,
         fileId,
         nowIso(),
+        claimant.filedBy,
       );
       return toClaim(await loadClaim(id), user);
     });
@@ -183,6 +272,10 @@ export async function reviewClaim(id: string, input: ClaimReviewInput, actor: Se
     const row = await loadClaim(id);
     if (isClaimant(row, user)) {
       throw forbidden("You cannot review your own claim. Ask the other reviewer.");
+    }
+    // Entering a claim for someone and then approving it would be reviewing one's own work.
+    if (row.filed_by !== null && row.filed_by === user.id) {
+      throw forbidden("You filed this claim on someone's behalf. Ask the other reviewer.");
     }
     const ts = nowIso();
     const refuse = () => conflict("invalid_claim_status", "This claim has already moved on. Reload to see where it stands.");

@@ -16,6 +16,11 @@ const BROWSE: PublicNavLink[] = [
  * are open to everyone, but a signed-in member or committee account must not
  * be shown "Login" as if they had been signed out.
  *
+ * A member's way back is "My account". So is the treasurer's: on the shop the
+ * treasurer is a customer like any other, so the header does not label them
+ * "Committee". The link still leads to the area their account opens (`/org`);
+ * only the wording differs. The president and the event handler keep "Committee".
+ *
  * `undefined` means the session is not known yet: only the links that are the
  * same for everyone are shown, so the menu never flashes the wrong state.
  * This decides what is displayed, nothing more; the server authorises every request.
@@ -25,5 +30,6 @@ export function publicNavLinks(user: SessionUser | null | undefined): PublicNavL
   if (user === null) {
     return [...BROWSE, { href: "/join", label: "Become a member" }, { href: "/login", label: "Login" }];
   }
-  return [...BROWSE, user.role === "member" ? { href: "/member", label: "My account" } : { href: "/org", label: "Committee" }];
+  if (user.role === "member") return [...BROWSE, { href: "/member", label: "My account" }];
+  return [...BROWSE, { href: "/org", label: user.role === "treasurer" ? "My account" : "Committee" }];
 }

@@ -62,6 +62,11 @@ function PasswordForm() {
   async function submit(e: FormEvent) {
     e.preventDefault();
     setFormError(null);
+    // The server checks this again; saying so here saves a round trip.
+    if (values.newPassword.length < MEMBER_PASSWORD_MIN) {
+      setErrors({ newPassword: `Use at least ${MEMBER_PASSWORD_MIN} characters` });
+      return;
+    }
     if (values.newPassword !== values.confirm) {
       setErrors({ confirm: "The two passwords do not match" });
       return;
@@ -93,6 +98,7 @@ function PasswordForm() {
           onChange={set("newPassword")}
           error={errors.newPassword}
           hint={`At least ${MEMBER_PASSWORD_MIN} characters.`}
+          minLength={MEMBER_PASSWORD_MIN}
           required
         />
         <TextField label="Type it again" type="password" autoComplete="new-password" value={values.confirm} onChange={set("confirm")} error={errors.confirm} required />

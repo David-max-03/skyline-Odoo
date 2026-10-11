@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, CalendarDays, Check, CircleAlert, ListChecks, Pencil, Plus, RotateCcw, Trash2, User } from "lucide-react";
+import { ArrowRight, CalendarDays, Check, CircleAlert, Info, ListChecks, Pencil, Plus, RotateCcw, Trash2, User } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { ConfirmDialog, Dialog, DialogActions, useToast } from "@/components/overlay";
 import { useCan } from "@/components/session";
@@ -13,6 +13,7 @@ import {
   FormError,
   LoadingBlock,
   Meter,
+  Notice,
   PageHeader,
   SelectField,
   TextAreaField,
@@ -25,6 +26,21 @@ import { TASK_NEXT_ACTION, TASK_STATUSES, TASK_STATUS_LABELS, type EventView, ty
 import { formatDate } from "@/lib/dates";
 
 export default function TasksPage() {
+  const canManageTasks = useCan("manageTasks");
+  if (!canManageTasks) {
+    return (
+      <>
+        <PageHeader title="Volunteer tasks" />
+        <Notice tone="neutral" icon={Info}>
+          Volunteer tasks are run by the president and the event handler. Your role does not include them.
+        </Notice>
+      </>
+    );
+  }
+  return <TaskBoard />;
+}
+
+function TaskBoard() {
   const toast = useToast();
   const canDelete = useCan("manageEvents");
   const canReviewVolunteers = useCan("reviewVolunteers");

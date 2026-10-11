@@ -9,9 +9,9 @@ import { ProductPhoto, QuantityStepper } from "@/components/shop-ui";
 import { Badge, Button, Card, EmptyState, FormError, LinkButton, Notice, PageHeader, TextField } from "@/components/ui";
 import { api, errorMessage, fieldErrors, useApi } from "@/lib/api-client";
 import { cart, useCart } from "@/lib/cart";
-import type { PublicProduct, SessionUser, ShopOrder } from "@/lib/contracts";
+import { isStaff, shopperMember, type PublicProduct, type SessionUser, type ShopOrder } from "@/lib/contracts";
 
-function Confirmation({ order: placed, isMemberAccount }: { order: ShopOrder; isMemberAccount: boolean }) {
+function Confirmation({ order: placed, isMemberAccount, ordersHref }: { order: ShopOrder; isMemberAccount: boolean; ordersHref: string }) {
   // Replaced by the server's version of the order after an online payment, never by a guess.
   const [order, setOrder] = useState(placed);
   const paid = order.unpaidCents === 0 && order.totalCents > 0;
@@ -60,7 +60,7 @@ function Confirmation({ order: placed, isMemberAccount }: { order: ShopOrder; is
         </div>
       )}
       <div className="mt-5 flex flex-wrap gap-2">
-        {isMemberAccount && <LinkButton href="/member/orders">See my orders</LinkButton>}
+        {isMemberAccount && <LinkButton href={ordersHref}>See my orders</LinkButton>}
         <LinkButton href="/shop" variant="secondary">
           Back to the shop
         </LinkButton>
@@ -79,7 +79,12 @@ export default function CartPage() {
   const [working, setWorking] = useState(false);
   const [placed, setPlaced] = useState<ShopOrder | null>(null);
 
-  const member = me.data?.user?.role === "member" ? me.data.user : null;
+  // Who the order is placed as: a member, or a committee account linked to a member record.
+  // The server decides this again from the session; this only chooses which form to show.
+  const viewer = me.data?.user ?? null;
+  const shopper = shopperMember(viewer);
+  const member = viewer && shopper ? { name: viewer.name, memberNo: shopper.memberNo } : null;
+  const unlinkedStaff = isStaff(viewer) && !shopper;
   const set = (key: keyof typeof values) => (e: { target: { value: string } }) =>
     setValues((v) => ({ ...v, [key]: e.target.value }));
 
@@ -125,7 +130,7 @@ export default function CartPage() {
     return (
       <>
         <PageHeader title="Thank you" />
-        <Confirmation order={placed} isMemberAccount={member !== null} />
+        <Confirmation order={placed} isMemberAccount={member !== null} ordersHref={isStaff(viewer) ? "/shop/orders" : "/member/orders"} />
       </>
     );
   }
@@ -230,6 +235,12 @@ export default function CartPage() {
                     hint="With the email on your membership, for the member price."
                     optional
                   />
+                  {unlinkedStaff && (
+                    <Notice tone="neutral" title="Online payment needs a member record">
+                      Your committee account is not linked to a member record, so this order is placed as a guest and paid to the
+                      committee on collection. The president can link a member to a committee account when adding it.
+                    </Notice>
+                  )}
                   <p className="text-[0.8125rem] text-muted">
                     Have a member account?{" "}
                     <Link href="/login?next=/member" className="font-medium text-brand hover:underline">
@@ -248,7 +259,9 @@ export default function CartPage() {
                 Place order
               </Button>
               <p className="text-[0.8125rem] text-muted">
-                No payment is taken on this site. Your items are reserved now and you pay the committee when you collect them.
+                {member
+                  ? "Your items are reserved when you place the order. You can then pay online if it is offered, or pay the committee when you collect them."
+                  : "No payment is taken on this site. Your items are reserved now and you pay the committee when you collect them."}
               </p>
             </form>
           </Card>

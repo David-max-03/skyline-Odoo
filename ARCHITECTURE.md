@@ -138,6 +138,11 @@ paid, a pending `refund` expense is recorded so the books show what is owed back
 - Reading follows the same matrix as writing. Staff routes that send member records,
   ledger data or orders read through `services/staff-views.ts`, which checks the role and
   removes ledger figures from events and the dashboard for a role that may not see them.
+  The treasurer does not run the door or volunteer tasks and does not add members by hand
+  (they admit members by reviewing applications). A committee account is never a member
+  session; one that is linked to a member record (`users.member_id`) may order and pay for
+  merchandise as that member through `shopperRoute`, with exactly the member's own view of
+  orders, and nothing else under `/api/me`. Without a linked member it shops as a guest.
   The event organizer sees no member records and no finance, and cannot take a ticket
   payment. Refunds (cancelling a paid ticket or paid merchandise order, paying out or
   voiding a refund entry, marking an online order payment refunded) and
@@ -168,6 +173,9 @@ paid, a pending `refund` expense is recorded so the books show what is owed back
 - The cart lives in the browser. It does not follow a member to another device.
 - Sign-in is rate-limited per address, not per account.
 - Product photos must be uploaded by the committee; none ship with the app.
+- Passwords are at least 8 characters (`PASSWORD_MIN`), for members and committee accounts
+  alike. The length is checked only when a password is set or changed; signing in does not
+  check it, so a password chosen under an earlier rule keeps working and is never rewritten.
 - One organisation per installation. No self-service password reset and no email: the
   president adds committee accounts, promotes members, changes roles and removes access at
   `/org/accounts`, and passes each one-time password link on by hand.

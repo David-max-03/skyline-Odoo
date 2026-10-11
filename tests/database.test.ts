@@ -121,14 +121,14 @@ describe("which database is used", () => {
 describe("queries and transactions", () => {
   it("passes values as parameters, so SQL in a value is only text", async () => {
     const hostile = "Robert'); DROP TABLE members; --";
-    const created = await createMember(member(1, { name: hostile }), staff.treasurer);
+    const created = await createMember(member(1, { name: hostile }), staff.admin);
     expect((await listMembers()).map((m) => m.name)).toEqual([hostile]);
     expect(await get<{ name: string }>("SELECT name FROM members WHERE id = ?", created.id)).toEqual({ name: hostile });
     expect(await get("SELECT id FROM members WHERE name = ?", "x' OR '1'='1")).toBeUndefined();
   });
 
   it("returns counts and flags as plain numbers on both databases", async () => {
-    await createMember(member(1), staff.treasurer);
+    await createMember(member(1), staff.admin);
     const row = await get<{ n: number; total: number; flag: number }>(
       "SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS total, CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS flag FROM transactions",
     );
@@ -159,7 +159,7 @@ describe("queries and transactions", () => {
   });
 
   it("gives every member a different number when many join at the same moment", async () => {
-    const created = await Promise.all(Array.from({ length: 12 }, (_, i) => createMember(member(i + 1), staff.treasurer)));
+    const created = await Promise.all(Array.from({ length: 12 }, (_, i) => createMember(member(i + 1), staff.admin)));
     const numbers = created.map((m) => m.memberNo).sort();
     expect(new Set(numbers).size).toBe(12);
     expect(numbers[0]).toBe("SKY-M-0001");
@@ -196,7 +196,7 @@ describe("queries and transactions", () => {
   });
 
   it("treats emails as case-insensitive for lookups and uniqueness", async () => {
-    await createMember(member(1, { email: "Mixed.Case@Campus.Example" }), staff.treasurer);
+    await createMember(member(1, { email: "Mixed.Case@Campus.Example" }), staff.admin);
     expect(await get("SELECT 1 AS found FROM members WHERE email = ?", "MIXED.CASE@campus.example")).toEqual({ found: 1 });
     await expect(
       run(
@@ -324,7 +324,8 @@ describe("a treasurer account", () => {
       treasurer,
     );
     expect(entry).toMatchObject({ amountCents: 25000, status: "settled" });
-    expect((await createMember(member(1), treasurer)).memberNo).toBe("SKY-M-0001");
+    // Members come to exist through applications the treasurer reviews; adding one by hand is the president's.
+    expect((await appError(() => createMember(member(1), treasurer))).status).toBe(403);
     expect(await listApplications(treasurer)).toEqual([]);
     const product = await createProduct(
       productInputSchema.parse({ name: "Cap", priceCents: 30000, memberPriceCents: 25000, variants: [{ size: "M", stock: 2 }] }),
@@ -339,8 +340,9 @@ describe("a treasurer account", () => {
     expect((await appError(() => createAnnouncement({ title: "Hello", body: "A notice for everyone.", audience: "everyone" }, treasurer))).status).toBe(403);
     const event = await publishedEvent(staff, { priceCents: 0, memberPriceCents: 0 });
     const ticket = await registerForEvent(event.id, person(1));
-    await checkIn({ code: ticket.code, eventId: event.id, collectPayment: false, method: "cash" }, treasurer); // check-in is allowed
-    expect((await appError(() => undoCheckIn(ticket.code, treasurer))).status).toBe(403); // undoing it is not
+    // The door is not the treasurer's either.
+    expect((await appError(() => checkIn({ code: ticket.code, eventId: event.id, collectPayment: false, method: "cash" }, treasurer))).status).toBe(403);
+    expect((await appError(() => undoCheckIn(ticket.code, treasurer))).status).toBe(403);
     expect((await appError(() => setEventStatus(event.id, "cancelled", treasurer))).status).toBe(403);
     // Nor can the account be turned into, or used to reset, an administrator.
     expect((await appError(() => resetAdminPassword("new.treasurer@club.example", "another-long-password"))).code).toBe("not_an_admin");
@@ -534,7 +536,7 @@ describe.runIf(onPostgres)("PostgreSQL only", () => {
 
       const real = await migratePostgres(sibling(name));
       expect(real).toMatchObject({ before: 1, after: POSTGRES_SCHEMA_VERSION });
-      expect(real.applied.map((m) => m.version)).toEqual([2, 3, 4]);
+      expect(real.applied.map((m) => m.version)).toEqual([2, 3, 4, 5]);
       expect((await direct.query("SELECT member_id FROM users")).rows).toEqual([{ member_id: null }]);
       expect((await direct.query("SELECT COUNT(*)::int AS n FROM staff_setup_tokens")).rows).toEqual([{ n: 0 }]);
       expect(await snapshot()).toEqual(before);
@@ -542,7 +544,7 @@ describe.runIf(onPostgres)("PostgreSQL only", () => {
       expect((await direct.query("SELECT volunteer_slots FROM tasks")).rows).toEqual([{ volunteer_slots: 0 }]);
       expect((await direct.query("SELECT disabled_at FROM users")).rows).toEqual([{ disabled_at: null }]);
       expect((await direct.query("SELECT COUNT(*)::int AS n FROM volunteer_requests")).rows).toEqual([{ n: 0 }]);
-      expect((await direct.query("SELECT version FROM schema_migrations ORDER BY version")).rows.map((r) => r.version)).toEqual([1, 2, 3, 4]);
+      expect((await direct.query("SELECT version FROM schema_migrations ORDER BY version")).rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5]);
       const upgraded = await openPostgres(sibling(name));
       await upgraded.close();
     } finally {

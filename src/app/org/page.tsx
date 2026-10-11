@@ -19,7 +19,7 @@ import {
 import { useState } from "react";
 import { CashflowChart } from "@/components/charts";
 import { EventStatusBadge, Money, percent } from "@/components/domain";
-import { useSession } from "@/components/session";
+import { useCan, useSession } from "@/components/session";
 import {
   Badge,
   Card,
@@ -51,6 +51,7 @@ function timeUntil(iso: string, from: number): string {
 
 export default function DashboardPage() {
   const user = useSession();
+  const canCheckIn = useCan("checkIn");
   const { data, error, loading, reload } = useApi<DashboardView>("/api/dashboard");
   const [openedAt] = useState(() => Date.now());
   const today = new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(openedAt);
@@ -63,9 +64,11 @@ export default function DashboardPage() {
         actions={
           // On phones these two are already in the tab bar.
           <div className="hidden gap-2 lg:flex">
-            <LinkButton href="/org/check-in" variant="secondary" icon={ScanLine}>
-              Check-in
-            </LinkButton>
+            {canCheckIn && (
+              <LinkButton href="/org/check-in" variant="secondary" icon={ScanLine}>
+                Check-in
+              </LinkButton>
+            )}
             <LinkButton href="/org/events" icon={CalendarDays}>
               Events
             </LinkButton>
@@ -116,13 +119,15 @@ export default function DashboardPage() {
               value={percent(data.tickets.attendanceRate)}
               detail={`${data.tickets.checkedIn} checked in across events that have started`}
             />
-            <Stat
-              label="Open tasks"
-              icon={ListChecks}
-              tone={data.tasks.overdue > 0 ? "bad" : "ok"}
-              value={data.tasks.open}
-              detail={data.tasks.overdue > 0 ? `${data.tasks.overdue} overdue · ${data.tasks.done} done` : `None overdue · ${data.tasks.done} done`}
-            />
+            {data.tasks && (
+              <Stat
+                label="Open tasks"
+                icon={ListChecks}
+                tone={data.tasks.overdue > 0 ? "bad" : "ok"}
+                value={data.tasks.open}
+                detail={data.tasks.overdue > 0 ? `${data.tasks.overdue} overdue · ${data.tasks.done} done` : `None overdue · ${data.tasks.done} done`}
+              />
+            )}
           </div>
 
           <div className="grid gap-5 lg:grid-cols-5">
@@ -199,9 +204,11 @@ export default function DashboardPage() {
                     <LinkButton href={`/org/events/${data.events.next.id}`} size="sm">
                       Open event
                     </LinkButton>
-                    <LinkButton href={`/org/check-in?event=${data.events.next.id}`} variant="secondary" size="sm" icon={ScanLine}>
-                      Check-in
-                    </LinkButton>
+                    {canCheckIn && (
+                      <LinkButton href={`/org/check-in?event=${data.events.next.id}`} variant="secondary" size="sm" icon={ScanLine}>
+                        Check-in
+                      </LinkButton>
+                    )}
                   </div>
                 </div>
               ) : (

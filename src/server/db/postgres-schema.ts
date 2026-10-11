@@ -451,6 +451,11 @@ CREATE TABLE staff_setup_tokens (
 CREATE INDEX staff_setup_tokens_user ON staff_setup_tokens(user_id);
 `;
 
+/** Version 5: who entered an expense claim on someone else's behalf. The same change as SQLite's version 12. */
+const V5_CLAIM_FILED_BY = `
+ALTER TABLE expense_claims ADD COLUMN filed_by ${T} REFERENCES users(id);
+`;
+
 export interface PostgresMigration {
   version: number;
   name: string;
@@ -462,6 +467,7 @@ export const POSTGRES_MIGRATIONS: PostgresMigration[] = [
   { version: 2, name: "volunteer requests (SQLite schema version 9)", sql: V2_VOLUNTEERING },
   { version: 3, name: "disabled committee accounts (SQLite schema version 10)", sql: V3_ACCOUNT_STATUS },
   { version: 4, name: "committee accounts managed from the web (SQLite schema version 11)", sql: V4_COMMITTEE_MANAGEMENT },
+  { version: 5, name: "expense claims filed on someone's behalf (SQLite schema version 12)", sql: V5_CLAIM_FILED_BY },
 ];
 
 /** The schema version this code needs. The server refuses to run against an older one. */

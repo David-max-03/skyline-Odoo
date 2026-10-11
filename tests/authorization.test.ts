@@ -15,7 +15,7 @@ import { completeSetup, createSetupToken, createUser, getSessionUser, login } fr
 import { get, run, today } from "@/server/db";
 import { createEvent, setEventStatus, updateEvent } from "@/server/services/events";
 import { createTransaction, listTransactions, settleTransaction, voidTransaction } from "@/server/services/finance";
-import { collectDues, createMember } from "@/server/services/members";
+import { collectDues, createMember, issueSetupLink } from "@/server/services/members";
 import { actOnOrder, createProduct, listOrders, placeOrder, setStock } from "@/server/services/merch";
 import { resolveOrderPayment } from "@/server/services/order-payments";
 import {
@@ -29,7 +29,7 @@ import {
   viewOrders,
   viewTransactions,
 } from "@/server/services/staff-views";
-import { createTask } from "@/server/services/tasks";
+import { createTask, deleteTask, transitionTask, updateTask } from "@/server/services/tasks";
 import { cancelTicket, checkIn, payTicket, registerForEvent, undoCheckIn, verifyTicket } from "@/server/services/tickets";
 import { listVolunteerRequests, requestToVolunteer, reviewVolunteerRequest } from "@/server/services/volunteering";
 import { appError, eventInput, freshDb, person, publishedEvent, type Staff } from "./helpers";
@@ -92,7 +92,7 @@ const tee = () =>
 
 beforeEach(async () => {
   staff = await freshDb();
-  member = await createMember(memberInputSchema.parse({ name: "Mira Member", email: "mira@campus.example", duesPaid: true }), staff.treasurer);
+  member = await createMember(memberInputSchema.parse({ name: "Mira Member", email: "mira@campus.example", duesPaid: true }), staff.admin);
   event = await publishedEvent(staff, { title: "Winter Gala" });
 });
 
@@ -180,8 +180,15 @@ describe("reading finance and payment records", () => {
       expect(full.members).toMatchObject({ total: 1 });
       expect(full.eventPerformance[0].netCents).toBe(30000);
       expect(full.cashflow.length).toBeGreaterThan(0);
-      expect(full.alerts.map((a) => a.kind)).toEqual(expect.arrayContaining(["low_stock", "overdue_tasks", "unpaid_tickets"]));
+      expect(full.alerts.map((a) => a.kind)).toEqual(expect.arrayContaining(["low_stock", "unpaid_tickets"]));
     }
+    // Volunteer tasks are not the treasurer's: no task figures and no task alert.
+    const president = await viewDashboard(staff.admin);
+    expect(president.tasks).toMatchObject({ overdue: 1 });
+    expect(president.alerts.map((a) => a.kind)).toContain("overdue_tasks");
+    const treasurers = await viewDashboard(staff.treasurer);
+    expect(treasurers.tasks).toBeNull();
+    expect(treasurers.alerts.map((a) => a.kind)).not.toContain("overdue_tasks");
 
     const reduced = await viewDashboard(staff.organizer);
     expect(reduced.finance).toBeNull();
@@ -190,7 +197,7 @@ describe("reading finance and payment records", () => {
     expect(reduced.eventPerformance[0]).toMatchObject({ registered: 2, netCents: null, incomeSettledCents: null, expenseSettledCents: null });
     expect(reduced.alerts.map((a) => a.kind)).toEqual(["overdue_tasks"]);
     expect(reduced.events.total).toBe(1);
-    expect(reduced.tasks.overdue).toBe(1);
+    expect(reduced.tasks?.overdue).toBe(1);
 
     expect(await status(() => viewDashboard(asMember(member)))).toBe(403);
   });
@@ -222,7 +229,7 @@ describe("ticket payments", () => {
     expect((await undoCheckIn(unpaid.code, staff.organizer)).checkedInAt).toBeNull();
 
     const second = await registerForEvent(event.id, person(2));
-    expect((await checkIn({ code: second.code, eventId: event.id, collectPayment: true, method: "upi" }, staff.treasurer)).outcome).toBe("checked_in");
+    expect((await checkIn({ code: second.code, eventId: event.id, collectPayment: true, method: "upi" }, staff.admin)).outcome).toBe("checked_in");
   });
 
   it("are refunded by cancelling a paid ticket: the president only", async () => {
@@ -290,11 +297,66 @@ describe("ticket payments", () => {
   });
 });
 
+describe("what the treasurer does not do", () => {
+  it("is in the permission table: no door, no volunteer tasks, no adding members by hand", () => {
+    expect(CAN.checkIn).toEqual(["admin", "organizer"]);
+    expect(CAN.manageTasks).toEqual(["admin", "organizer"]);
+    expect(CAN.addMembers).toEqual(["admin"]);
+    // Everything the treasurer is for is untouched.
+    for (const action of ["manageFinance", "manageMembers", "manageMerch", "collectPayment", "fileExpenseClaim"] as const) {
+      expect(CAN[action] as readonly string[]).toContain("treasurer");
+    }
+  });
+
+  it("cannot look a ticket up at the door or check anyone in, even to take a payment", async () => {
+    const ticket = await registerForEvent(event.id, person(1));
+    expect(await allowed((actor) => verifyTicket(ticket.code, event.id, actor))).toEqual(["admin", "organizer"]);
+    expect(await status(() => checkIn({ code: ticket.code, eventId: event.id, collectPayment: false, method: "cash" }, staff.treasurer))).toBe(403);
+    expect(await status(() => checkIn({ code: ticket.code, eventId: event.id, collectPayment: true, method: "cash" }, staff.treasurer))).toBe(403);
+    expect((await get<{ n: number }>("SELECT COUNT(*) AS n FROM tickets WHERE checked_in_at IS NOT NULL"))!.n).toBe(0);
+    expect(await status(() => checkIn({ code: ticket.code, eventId: event.id, collectPayment: false, method: "cash" }, asMember(member)))).toBe(403);
+    // The treasurer still records the payment, from the event page.
+    expect((await payTicket(ticket.code, "cash", staff.treasurer)).paymentStatus).toBe("paid");
+    expect(await status(() => checkIn({ code: ticket.code, eventId: event.id, collectPayment: false, method: "cash" }, staff.organizer))).toBe(200);
+  });
+
+  it("cannot create, edit, move or delete volunteer tasks", async () => {
+    const input = taskInputSchema.parse({ title: "Book the hall" });
+    expect(await allowed((actor) => createTask(input, actor))).toEqual(["admin", "organizer"]);
+    const task = await createTask(input, staff.organizer);
+    expect(await status(() => updateTask(task.id, taskInputSchema.parse({ title: "Renamed" }), staff.treasurer))).toBe(403);
+    expect(await status(() => transitionTask(task.id, "start", staff.treasurer))).toBe(403);
+    expect(await status(() => deleteTask(task.id, staff.treasurer))).toBe(403);
+    expect(await status(() => listVolunteerRequests(staff.treasurer))).toBe(403);
+    expect((await get<{ title: string; status: string }>("SELECT title, status FROM tasks WHERE id = ?", task.id))).toEqual({ title: "Book the hall", status: "todo" });
+    expect((await transitionTask(task.id, "start", staff.admin)).status).toBe("in_progress");
+  });
+
+  it("cannot add a member by hand; only the president can", async () => {
+    const input = (n: number) => memberInputSchema.parse({ name: `New Member ${n}`, email: `new${n}@campus.example`, duesPaid: false });
+    expect(await status(() => createMember(input(1), staff.treasurer))).toBe(403);
+    expect(await status(() => createMember(input(1), staff.organizer))).toBe(403);
+    expect(await status(() => createMember(input(1), asMember(member)))).toBe(403);
+    expect(await status(() => createMember(input(1), null))).toBe(401);
+    expect((await get<{ n: number }>("SELECT COUNT(*) AS n FROM members"))!.n).toBe(1);
+    expect((await createMember(input(2), staff.admin)).memberNo).toBe("SKY-M-0002");
+  });
+
+  it("still sees member records, dues and status, collects dues and issues password links", async () => {
+    const unpaid = await createMember(memberInputSchema.parse({ name: "Uma Unpaid", email: "uma@campus.example", duesPaid: false }), staff.admin);
+    const listed = await viewMembers(staff.treasurer);
+    expect(listed.map((m) => [m.memberNo, m.status]).sort()).toEqual([["SKY-M-0001", "active"], ["SKY-M-0002", "unpaid"]]);
+    expect((await viewMember(unpaid.id, staff.treasurer)).duesOwedCents).toBeGreaterThan(0);
+    expect((await collectDues(unpaid.id, "cash", staff.treasurer)).status).toBe("active");
+    expect((await issueSetupLink(unpaid.id, staff.treasurer)).memberNo).toBe("SKY-M-0002");
+  });
+});
+
 describe("what each role keeps", () => {
   it("the treasurer keeps every financial operation", async () => {
     const entry = await createTransaction(expense(), staff.treasurer);
     expect((await settleTransaction(entry.id, "bank", staff.treasurer)).status).toBe("settled");
-    const owing = await createMember(memberInputSchema.parse({ name: "Omar Owing", email: "omar@campus.example", duesPaid: false }), staff.treasurer);
+    const owing = await createMember(memberInputSchema.parse({ name: "Omar Owing", email: "omar@campus.example", duesPaid: false }), staff.admin);
     expect((await collectDues(owing.id, "cash", staff.treasurer)).duesOwedCents).toBe(0);
     const product = await createProduct(tee(), staff.treasurer);
     expect((await setStock(product.id, product.variants[0].id, 7, staff.treasurer)).variants[0].stock).toBe(7);
@@ -339,7 +401,7 @@ describe("what each role keeps", () => {
     const task = await createTask(taskInputSchema.parse({ title: "Welcome desk", eventId: event.id, volunteerSlots: 3 }), staff.organizer);
     const helpers: Member[] = [member];
     for (const n of [1, 2]) {
-      helpers.push(await createMember(memberInputSchema.parse({ name: `Helper ${n}`, email: `helper${n}@campus.example`, duesPaid: true }), staff.treasurer));
+      helpers.push(await createMember(memberInputSchema.parse({ name: `Helper ${n}`, email: `helper${n}@campus.example`, duesPaid: true }), staff.admin));
     }
     const requests: { id: string }[] = [];
     for (const m of helpers) requests.push(await requestToVolunteer(m.id, task.id));
@@ -422,7 +484,7 @@ describe("committee accounts", () => {
   });
 
   it("a disabled account that is also a member can still sign in as that member", async () => {
-    const both = await createMember(memberInputSchema.parse({ name: "Organizer", email: "organizer@test.example", duesPaid: true }), staff.treasurer);
+    const both = await createMember(memberInputSchema.parse({ name: "Organizer", email: "organizer@test.example", duesPaid: true }), staff.admin);
     await completeSetup((await createSetupToken(both.id, staff.admin.id)).token, "a-member-password");
     await setCommitteeAccountStatus(staff.organizer.id, "disable", staff.admin);
     expect((await login("organizer@test.example", "a-member-password")).user.role).toBe("member");
