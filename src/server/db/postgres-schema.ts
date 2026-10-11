@@ -435,6 +435,22 @@ const V3_ACCOUNT_STATUS = `
 ALTER TABLE users ADD COLUMN disabled_at ${T};
 `;
 
+/** Version 4: committee accounts managed from the web. The same change as SQLite's version 11. */
+const V4_COMMITTEE_MANAGEMENT = `
+ALTER TABLE users ADD COLUMN member_id ${T} REFERENCES members(id) ON DELETE SET NULL;
+CREATE UNIQUE INDEX users_member ON users(member_id) WHERE member_id IS NOT NULL;
+
+CREATE TABLE staff_setup_tokens (
+  token_hash ${T} PRIMARY KEY,
+  user_id    ${T} NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at ${T} NOT NULL,
+  used_at    ${T},
+  created_by ${T} REFERENCES users(id) ON DELETE SET NULL,
+  created_at ${T} NOT NULL
+);
+CREATE INDEX staff_setup_tokens_user ON staff_setup_tokens(user_id);
+`;
+
 export interface PostgresMigration {
   version: number;
   name: string;
@@ -445,6 +461,7 @@ export const POSTGRES_MIGRATIONS: PostgresMigration[] = [
   { version: 1, name: "baseline (SQLite schema versions 1 to 8)", sql: V1_BASELINE },
   { version: 2, name: "volunteer requests (SQLite schema version 9)", sql: V2_VOLUNTEERING },
   { version: 3, name: "disabled committee accounts (SQLite schema version 10)", sql: V3_ACCOUNT_STATUS },
+  { version: 4, name: "committee accounts managed from the web (SQLite schema version 11)", sql: V4_COMMITTEE_MANAGEMENT },
 ];
 
 /** The schema version this code needs. The server refuses to run against an older one. */
@@ -463,7 +480,7 @@ export const EXPECTED_TABLES = [
   "checkouts", "orders", "transactions", "tasks", "announcements", "member_accounts", "member_sessions",
   "account_setup_tokens", "files", "file_contents", "membership_applications", "expense_claims",
   "product_images", "online_applications", "razorpay_webhook_events", "order_payments", "order_payment_lines",
-  "rate_limits", "volunteer_requests",
+  "rate_limits", "volunteer_requests", "staff_setup_tokens",
 ] as const;
 
 /** The uniqueness rules that money, stock and identity depend on. A database missing any of them must not be used. */

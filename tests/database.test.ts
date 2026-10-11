@@ -534,13 +534,15 @@ describe.runIf(onPostgres)("PostgreSQL only", () => {
 
       const real = await migratePostgres(sibling(name));
       expect(real).toMatchObject({ before: 1, after: POSTGRES_SCHEMA_VERSION });
-      expect(real.applied.map((m) => m.version)).toEqual([2, 3]);
+      expect(real.applied.map((m) => m.version)).toEqual([2, 3, 4]);
+      expect((await direct.query("SELECT member_id FROM users")).rows).toEqual([{ member_id: null }]);
+      expect((await direct.query("SELECT COUNT(*)::int AS n FROM staff_setup_tokens")).rows).toEqual([{ n: 0 }]);
       expect(await snapshot()).toEqual(before);
       // The new columns arrive with the values that mean "as before": not open to volunteers, not disabled.
       expect((await direct.query("SELECT volunteer_slots FROM tasks")).rows).toEqual([{ volunteer_slots: 0 }]);
       expect((await direct.query("SELECT disabled_at FROM users")).rows).toEqual([{ disabled_at: null }]);
       expect((await direct.query("SELECT COUNT(*)::int AS n FROM volunteer_requests")).rows).toEqual([{ n: 0 }]);
-      expect((await direct.query("SELECT version FROM schema_migrations ORDER BY version")).rows.map((r) => r.version)).toEqual([1, 2, 3]);
+      expect((await direct.query("SELECT version FROM schema_migrations ORDER BY version")).rows.map((r) => r.version)).toEqual([1, 2, 3, 4]);
       const upgraded = await openPostgres(sibling(name));
       await upgraded.close();
     } finally {

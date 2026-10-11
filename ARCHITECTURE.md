@@ -59,7 +59,8 @@ dates are `YYYY-MM-DD` in the organisation's timezone. The schema is in `src/ser
 
 | Table | Purpose | Notable constraints |
 |---|---|---|
-| `users`, `sessions` | Staff accounts and sign-ins | Session token stored as SHA-256; role read from `users` on every request. `disabled_at` turns an account off without deleting it |
+| `users`, `sessions` | Staff accounts and sign-ins | Session token stored as SHA-256; role read from `users` on every request. `disabled_at` turns an account off without deleting it. `member_id` links an account to the member it was promoted from. A password hash of `unset` means the person has not used their setup link yet |
+| `staff_setup_tokens` | One-time password links for committee accounts | Only the SHA-256 is stored; single use; 72-hour expiry; a new link revokes the old one |
 | `members`, `membership_periods` | People and their terms | Status is derived from terms, never stored |
 | `member_accounts`, `member_sessions` | Member passwords and sign-ins | Separate from staff tables, so a member session can only ever resolve to the role `member` |
 | `account_setup_tokens` | One-time password-setup links | Only the SHA-256 is stored; single use; 72-hour expiry; a new link revokes the old one |
@@ -167,9 +168,9 @@ paid, a pending `refund` expense is recorded so the books show what is owed back
 - The cart lives in the browser. It does not follow a member to another device.
 - Sign-in is rate-limited per address, not per account.
 - Product photos must be uploaded by the committee; none ship with the app.
-- One organisation per installation. No self-service password reset. Committee accounts
-  are created from the command line; the president can disable and re-enable them at
-  `/org/accounts` but cannot create one or change a role there.
+- One organisation per installation. No self-service password reset and no email: the
+  president adds committee accounts, promotes members, changes roles and removes access at
+  `/org/accounts`, and passes each one-time password link on by hand.
 - Public sign-up reveals whether an email is already a member ("already on the list").
 - Rate limits are counted in the database (`rate_limits`), so they hold across server instances.
 - Upload bytes are in the database (`file_contents`) on PostgreSQL, and on disk for local SQLite.

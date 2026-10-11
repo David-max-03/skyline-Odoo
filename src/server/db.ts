@@ -177,6 +177,7 @@ export const TABLES_IN_DELETE_ORDER = [
   "file_contents",
   "files",
   "account_setup_tokens",
+  "staff_setup_tokens",
   "member_sessions",
   "member_accounts",
   "membership_periods",

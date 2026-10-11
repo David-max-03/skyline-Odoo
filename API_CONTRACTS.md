@@ -229,14 +229,32 @@ existing `POST /api/orders/:id`. `productInputSchema` and `productUpdateSchema` 
 | Endpoint | Role | Body | Returns |
 |---|---|---|---|
 | `GET /api/accounts` | A | — | `CommitteeAccount[]` (never anything about passwords) |
+| `POST /api/accounts` | A | `accountCreateSchema`: `{ role, name, email }` for a new person, or `{ role, memberId }` for an existing member. Any other key is refused (`422`) | `{ account, setupLink }` |
 | `POST /api/accounts/:id` | A | `{ action: "disable" \| "enable" }` | `CommitteeAccount` |
+| `PATCH /api/accounts/:id` | A | `{ role }` | `CommitteeAccount`; every session of the account is ended |
+| `POST /api/accounts/:id/setup-link` | A | — | `CommitteeSetupLink` (a new one-time password link; cancels an earlier unused one). `403` for another president who already has a password; `409` for one's own or a disabled account |
+| `POST /api/auth/staff-setup/check` | public | `{ token }` | `StaffSetupInfo` (name, email, role, expiry). Changes nothing |
+| `POST /api/auth/staff-setup` | public | `{ token, password }` (at least 12 characters) | `{ email }`. The link stops working |
+
+No password is ever chosen or shown by the president. A new account is stored unable to
+sign in, and `setupLink.path` (`/committee-setup/<token>`) is returned once; only the
+SHA-256 of the token is stored, it works once and expires after 72 hours. Skyline sends
+no email, so the president passes the link on.
+
+Promoting a member (`memberId`) creates a committee account with the member's name and
+email and sets `users.member_id`. Nothing in the member's own records is written, and the
+member sign-in keeps its own password. Errors on create: `email_taken`, `member_email`
+(the email belongs to a member; promote them instead), `already_committee` (409),
+`not_found` (404). Errors on a role change: `own_account`, `same_role`, `last_president`
+(409). Each change re-checks inside its transaction that the caller is still an active
+president, so presidents acting on each other at once cannot both succeed.
 
 `disable` sets `users.disabled_at`, deletes every session of the account and stops it
 signing in (the login error is the same as for a wrong password). The row is kept, so
 ledger entries, reviews and check-ins still name their author. `enable` restores sign-in
 with the existing password. Errors: `own_account` (409, a president cannot disable
 themselves), `already_disabled`, `not_disabled` (409), `not_found` (404). Accounts are
-created only from the command line (`admin:create`, `staff:create`).
+never deleted. The first president is still created from the command line (`admin:create`).
 
 ## Who may read what
 

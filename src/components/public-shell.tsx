@@ -7,8 +7,9 @@ import { useApi } from "@/lib/api-client";
 import { cart } from "@/lib/cart";
 import { SETTINGS, type SessionUser } from "@/lib/contracts";
 import { publicNavLinks } from "@/lib/public-nav";
+import { LayoutDashboard, LogIn, UserRound } from "lucide-react";
 import { CartLink } from "./shop-ui";
-import { cn } from "./ui";
+import { buttonClass, cn } from "./ui";
 
 /** The Skyline mark: a row of rooftops with the sun coming up behind them. */
 export function Logo({
@@ -48,6 +49,9 @@ export function Logo({
 const VisitorContext = createContext<SessionUser | null | undefined>(undefined);
 export const useVisitor = () => useContext(VisitorContext);
 
+/** Login for a visitor, or the signed-in person's own area. Shown as a button, not in the link row. */
+const ENTRY_HREFS = ["/login", "/member", "/org"];
+
 /** Header and footer for the pages students and visitors see. */
 export function PublicShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -61,6 +65,10 @@ export function PublicShell({ children }: { children: ReactNode }) {
   }, [visitorId]);
   const links = publicNavLinks(visitor);
   const account = links.find((link) => link.href === "/member" || link.href === "/org");
+  // The way in (or back to one's own area) sits beside the cart, outside the row of
+  // links that scrolls on a narrow screen, so it can never be scrolled out of view.
+  const entry = links.find((link) => ENTRY_HREFS.includes(link.href));
+  const EntryIcon = entry?.href === "/org" ? LayoutDashboard : entry?.href === "/member" ? UserRound : LogIn;
   return (
     <VisitorContext.Provider value={visitor}>
       <div className="flex min-h-dvh flex-col">
@@ -70,7 +78,7 @@ export function PublicShell({ children }: { children: ReactNode }) {
               <Logo compact />
             </Link>
             <nav aria-label="Main" className="no-scrollbar flex min-w-0 items-center gap-0.5 overflow-x-auto sm:gap-1">
-              {links.map((link) => {
+              {links.filter((link) => link !== entry).map((link) => {
                 const active = link.href === "/" ? pathname === "/" : pathname === link.href || pathname.startsWith(`${link.href}/`);
                 return (
                   <Link
@@ -87,7 +95,15 @@ export function PublicShell({ children }: { children: ReactNode }) {
                 );
               })}
             </nav>
-            <CartLink />
+            <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+              {entry && (
+                <Link href={entry.href} className={buttonClass(entry.href === "/login" ? "primary" : "secondary", "sm")}>
+                  <EntryIcon className="size-4 shrink-0 max-[379px]:hidden" aria-hidden />
+                  {entry.label}
+                </Link>
+              )}
+              <CartLink />
+            </div>
           </div>
         </header>
         <main id="main" className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
@@ -100,9 +116,10 @@ export function PublicShell({ children }: { children: ReactNode }) {
               <Link href="/news" className="font-medium text-brand hover:underline">
                 News
               </Link>
-              {visitor !== undefined && (
-                <Link href={account?.href ?? "/login"} className="font-medium text-brand hover:underline">
-                  {account?.label ?? "Sign in"}
+              {/* A visitor already has Login in the header; only a signed-in person gets a second way back. */}
+              {account && (
+                <Link href={account.href} className="font-medium text-brand hover:underline">
+                  {account.label}
                 </Link>
               )}
             </p>

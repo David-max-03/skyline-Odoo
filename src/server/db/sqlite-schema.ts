@@ -514,6 +514,28 @@ const SCHEMA_V10 = `
 ALTER TABLE users ADD COLUMN disabled_at TEXT;
 `;
 
+/**
+ * Version 11: committee accounts managed from the web.
+ * - `users.member_id` links a committee account to the member it was promoted
+ *   from. The member row is the same row as before; nothing is copied.
+ * - `staff_setup_tokens` holds one-time links with which a committee account
+ *   sets its own password. Only the SHA-256 of a link is stored.
+ */
+const SCHEMA_V11 = `
+ALTER TABLE users ADD COLUMN member_id TEXT REFERENCES members(id) ON DELETE SET NULL;
+CREATE UNIQUE INDEX users_member ON users(member_id) WHERE member_id IS NOT NULL;
+
+CREATE TABLE staff_setup_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  used_at    TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX staff_setup_tokens_user ON staff_setup_tokens(user_id);
+`;
+
 /** Applied in order; `PRAGMA user_version` records how many have run. */
 export const SQLITE_MIGRATIONS = [
   SCHEMA_V1,
@@ -526,4 +548,5 @@ export const SQLITE_MIGRATIONS = [
   SCHEMA_V8,
   SCHEMA_V9,
   SCHEMA_V10,
+  SCHEMA_V11,
 ];

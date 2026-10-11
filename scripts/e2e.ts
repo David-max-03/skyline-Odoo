@@ -1144,6 +1144,64 @@ async function main(): Promise<void> {
   assert.equal((await admin.post(`/api/accounts/${leaverId}`, { action: "disable" })).status, 200);
   ok("enabling restores sign-in with the same password");
 
+  // Committee management from the web: add, promote a member, change a role.
+  const newPerson = { role: "organizer", name: "Nadia New", email: "nadia.new@e2e.example" };
+  for (const client of [treasurer, organizer, member, anon]) {
+    const refused = await client.post("/api/accounts", { ...newPerson, role: "admin" });
+    // Signed-in committee roles are refused outright; a member or a visitor never gets as far as the role check.
+    if (client === treasurer || client === organizer) assert.equal(refused.status, 403);
+    else assert.ok([401, 403].includes(refused.status));
+    assert.ok([401, 403].includes((await client.patch(`/api/accounts/${leaverId}`, { role: "admin" })).status));
+    assert.ok([401, 403].includes((await client.post(`/api/accounts/${leaverId}/setup-link`, {})).status));
+  }
+  assert.equal((await admin.post("/api/accounts", { ...newPerson, password: "chosen-by-the-caller" })).status, 422);
+  assert.equal((await admin.post("/api/accounts", { ...newPerson, role: "member" })).status, 422);
+  assert.equal((await admin.post("/api/accounts", { ...newPerson, email: "TREASURER@e2e.example" })).error?.code, "email_taken");
+  const invited = await admin.post("/api/accounts", newPerson);
+  assert.equal(invited.status, 200, JSON.stringify(invited.error));
+  assert.equal(invited.data.account.setupPending, true);
+  assert.ok(!/password|hash/i.test(JSON.stringify(invited.data)));
+  const inviteToken = invited.data.setupLink.path.split("/").pop();
+  assert.equal((await anon.get(invited.data.setupLink.path)).status, 200);
+  assert.equal((await anon.post("/api/auth/login", { email: newPerson.email, password: "unset" })).status, 401);
+  assert.equal((await anon.post("/api/auth/staff-setup/check", { token: inviteToken })).data.role, "organizer");
+  assert.equal((await anon.post("/api/auth/staff-setup", { token: inviteToken, password: "short" })).status, 422);
+  assert.equal((await anon.post("/api/auth/staff-setup", { token: inviteToken, password: "nadia chooses her own" })).data.email, newPerson.email);
+  assert.equal((await anon.post("/api/auth/staff-setup", { token: inviteToken, password: "someone tries again" })).error?.code, "invalid_link");
+  const nadia = new Client();
+  assert.equal((await nadia.post("/api/auth/login", { email: newPerson.email, password: "nadia chooses her own" })).data.user.role, "organizer");
+  assert.equal((await nadia.get("/api/finance/summary")).status, 403);
+  ok("the president adds a committee account; the person sets their own password with a one-time link; nobody else can add one");
+
+  const changed = await admin.patch(`/api/accounts/${invited.data.account.id}`, { role: "treasurer" });
+  assert.equal(changed.data.role, "treasurer");
+  assert.equal((await nadia.get("/api/events")).status, 401);
+  await nadia.post("/api/auth/login", { email: newPerson.email, password: "nadia chooses her own" });
+  assert.equal((await nadia.get("/api/finance/summary")).status, 200);
+  assert.equal((await nadia.get("/api/accounts")).status, 403);
+  assert.equal((await nadia.patch(`/api/accounts/${invited.data.account.id}`, { role: "admin" })).status, 403);
+  assert.equal((await admin.patch(`/api/accounts/${selfId}`, { role: "treasurer" })).error?.code, "own_account");
+  assert.equal((await admin.patch(`/api/accounts/${invited.data.account.id}`, { role: "treasurer" })).error?.code, "same_role");
+  assert.equal((await admin.patch(`/api/accounts/${invited.data.account.id}`, { role: "owner" })).status, 422);
+  ok("changing a role signs the account out and the new role applies at once; a president cannot change their own");
+  assert.equal((await admin.post(`/api/accounts/${invited.data.account.id}/setup-link`, {})).data.role, "treasurer");
+  await admin.patch(`/api/accounts/${invited.data.account.id}`, { role: "admin" });
+  assert.equal((await admin.post(`/api/accounts/${invited.data.account.id}/setup-link`, {})).status, 403);
+  await admin.patch(`/api/accounts/${invited.data.account.id}`, { role: "treasurer" });
+  ok("a president can create a password link for a treasurer but not for another president");
+
+  const memberBefore = (await admin.get(`/api/members/${memberId}`)).data;
+  const membersBefore2 = (await admin.get("/api/members")).data.length;
+  const promoted = await admin.post("/api/accounts", { role: "organizer", memberId });
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.error));
+  assert.equal(promoted.data.account.memberNo, memberBefore.memberNo);
+  assert.equal(promoted.data.account.email, memberBefore.email);
+  assert.equal((await admin.post("/api/accounts", { role: "treasurer", memberId })).error?.code, "already_committee");
+  assert.deepEqual((await admin.get(`/api/members/${memberId}`)).data, memberBefore);
+  assert.equal((await admin.get("/api/members")).data.length, membersBefore2);
+  assert.equal((await admin.get("/api/accounts")).data.length, 6);
+  ok("promoting a member adds a linked committee account and leaves the member record as it was");
+
   // --- cross-site requests ---------------------------------------------------------
   const crossSite = new Client({ Origin: "https://evil.example" });
   await crossSite.signIn("organizer@e2e.example").then(

@@ -66,9 +66,10 @@ npm run db:migrate -- --env-file .env.neon             # applies it
 npm run db:status  -- --env-file .env.neon             # checks tables, keys and uniqueness rules
 ```
 
-The schema is currently at version 3 (version 1 is the baseline; version 2 adds
+The schema is currently at version 4 (version 1 is the baseline; version 2 adds
 volunteer requests; version 3 adds the column that lets the president disable a
-committee account). A database at an older version must be migrated before this
+committee account; version 4 adds the member link and one-time password links for
+committee accounts managed from the web). A database at an older version must be migrated before this
 build is deployed, or every data route answers 503. One `db:migrate` run applies
 every missing version in order.
 

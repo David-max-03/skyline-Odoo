@@ -97,7 +97,7 @@ export type AccountRole = Role | "member";
 export const ROLE_LABELS: Record<AccountRole, string> = {
   admin: "President (admin)",
   treasurer: "Treasurer",
-  organizer: "Event organizer",
+  organizer: "Event Handler",
   member: "Member",
 };
 
@@ -226,13 +226,76 @@ export interface CommitteeAccount {
   createdAt: string;
   /** Set while the account is disabled: it cannot sign in and has no sessions. */
   disabledAt: string | null;
-  /** The account making the request. It cannot disable itself. */
+  /** True until the person has set a password with their setup link; they cannot sign in before that. */
+  setupPending: boolean;
+  /** Set when the account was given to an existing member: that member's number. */
+  memberNo: string | null;
+  /** The account making the request. It cannot disable itself or change its own role. */
   isYou: boolean;
 }
 
 export const ACCOUNT_ACTIONS = ["disable", "enable"] as const;
 export const accountActionSchema = z.object({ action: z.enum(ACCOUNT_ACTIONS) });
 export type AccountAction = (typeof ACCOUNT_ACTIONS)[number];
+
+/** Committee passwords get a higher bar than member ones. */
+export const STAFF_PASSWORD_MIN = 12;
+
+const committeeRole = z.enum(ROLES, { error: "Choose a committee role" });
+
+/**
+ * A new committee account: either a new person (name and email), or an
+ * existing member (`memberId`), whose name and email are then taken from the
+ * member record. Nothing else is accepted: no password, no id, no status.
+ */
+export const accountCreateSchema = z
+  .object({
+    role: committeeRole,
+    memberId: z.string().trim().min(1).max(64).optional(),
+    name: z.string().trim().max(80, "Name must be at most 80 characters").optional(),
+    email: z.string().trim().toLowerCase().max(200, "Email is too long").optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.memberId) return;
+    if (!value.name || value.name.length < 2) ctx.addIssue({ code: "custom", path: ["name"], message: "Enter the person's full name" });
+    if (!value.email || !z.email().safeParse(value.email).success) {
+      ctx.addIssue({ code: "custom", path: ["email"], message: "Enter a valid email address" });
+    }
+  });
+export type AccountCreateInput = z.infer<typeof accountCreateSchema>;
+
+export const accountRoleSchema = z.object({ role: committeeRole }).strict();
+
+/** A one-time link with which a committee account sets its own password. Shown once, to the president who issued it. */
+export interface CommitteeSetupLink {
+  path: string;
+  expiresAt: string;
+  name: string;
+  email: string;
+  role: Role;
+}
+
+export interface CommitteeAccountCreated {
+  account: CommitteeAccount;
+  setupLink: CommitteeSetupLink;
+}
+
+/** What the holder of a committee setup link is shown before choosing a password. */
+export interface StaffSetupInfo {
+  name: string;
+  email: string;
+  role: Role;
+  expiresAt: string;
+}
+
+export const staffPasswordSetupSchema = z.object({
+  token: z.string({ error: "This link is incomplete" }).min(20, "This link is incomplete").max(200),
+  password: z
+    .string({ error: "Choose a password" })
+    .min(STAFF_PASSWORD_MIN, `Use at least ${STAFF_PASSWORD_MIN} characters`)
+    .max(200, "Password is too long"),
+});
 
 // ---------------------------------------------------------------------------
 // Payments

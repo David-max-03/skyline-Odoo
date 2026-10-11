@@ -129,7 +129,7 @@ export default function AnnouncementsPage() {
             </Card>
           ) : (
             <Notice tone="neutral" icon={Info}>
-              Your role can read announcements. The president and event organizers can post them.
+              Your role can read announcements. The president and event handlers can post them.
             </Notice>
           )}
 

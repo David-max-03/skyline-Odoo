@@ -31,12 +31,12 @@ import { describeTarget, fail, loadEnvFile, migrationUrl, parseArgs } from "./li
 
 /** Tables in an order that satisfies every foreign key. */
 const COPY_ORDER = [
-  "users", "members", "membership_periods", "member_accounts", "events", "tickets", "products",
+  "members", "users", "membership_periods", "member_accounts", "events", "tickets", "products",
   "product_variants", "checkouts", "orders", "transactions", "tasks", "announcements", "files",
   "membership_applications", "expense_claims", "product_images", "online_applications",
   "razorpay_webhook_events", "order_payments", "order_payment_lines",
 ] as const;
-const NOT_COPIED = ["sessions", "member_sessions", "account_setup_tokens", "rate_limits"];
+const NOT_COPIED = ["sessions", "member_sessions", "account_setup_tokens", "staff_setup_tokens", "rate_limits"];
 
 const LEDGER_SQL = "SELECT type, status, COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS total FROM transactions GROUP BY type, status ORDER BY type, status";
 const CONSISTENCY_SQL = `SELECT
