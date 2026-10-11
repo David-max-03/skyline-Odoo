@@ -52,29 +52,25 @@ import {
   CATEGORY_LABELS,
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
-  type BreakEvenAnalysis,
   type EventStatusChange,
-  type EventSummary,
-  type ProfitTargetAnalysis,
+  type EventDetailView,
+  type EventView,
   type Ticket,
   type Transaction,
 } from "@/lib/contracts";
 import { formatDate, formatDateTime, formatShortDateTime, formatTime } from "@/lib/dates";
-
-interface EventDetail {
-  event: EventSummary;
-  tickets: Ticket[];
-  breakEven: BreakEvenAnalysis;
-  profitTarget: ProfitTargetAnalysis | null;
-}
 
 export default function EventDetailPage() {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
   const canManage = useCan("manageEvents");
   const canFinance = useCan("manageFinance");
-  const detail = useApi<EventDetail>(`/api/events/${id}`);
-  const ledger = useApi<Transaction[]>(`/api/transactions?eventId=${id}`);
+  const canCollect = useCan("collectPayment");
+  const canRefund = useCan("processRefunds");
+  const canCancelEvent = useCan("cancelEvents");
+  const detail = useApi<EventDetailView>(`/api/events/${id}`);
+  // The ledger is for the president and the treasurer; the server refuses anyone else.
+  const ledger = useApi<Transaction[]>(canFinance ? `/api/transactions?eventId=${id}` : null);
 
   const [tab, setTab] = useState<"people" | "money">("people");
   const [editing, setEditing] = useState(false);
@@ -182,7 +178,7 @@ export default function EventDetailPage() {
                 </LinkButton>
               </>
             )}
-            {canManage && event.status !== "cancelled" && (
+            {canCancelEvent && event.status !== "cancelled" && (
               <Button variant="ghost" icon={Ban} className="!text-bad hover:!bg-bad-soft" onClick={() => setConfirm("cancel-event")}>
                 Cancel event
               </Button>
@@ -260,19 +256,22 @@ export default function EventDetailPage() {
           value={event.stats.checkedIn}
           detail={event.phase === "upcoming" ? "Event has not started yet" : `Turnout ${percent(event.stats.attendanceRate)}`}
         />
-        <Stat
-          label="Result so far"
-          icon={Wallet}
-          tone={f.netCents < 0 ? "bad" : "ok"}
-          value={<Money cents={f.netCents} signed />}
-          detail={
-            <>
-              <Money cents={f.incomeSettledCents} /> collected − <Money cents={f.expenseSettledCents} /> paid
-            </>
-          }
-        />
+        {f && (
+          <Stat
+            label="Result so far"
+            icon={Wallet}
+            tone={f.netCents < 0 ? "bad" : "ok"}
+            value={<Money cents={f.netCents} signed />}
+            detail={
+              <>
+                <Money cents={f.incomeSettledCents} /> collected − <Money cents={f.expenseSettledCents} /> paid
+              </>
+            }
+          />
+        )}
       </div>
 
+      {breakEven && (
       <div className="mt-4 grid gap-4 lg:grid-cols-2 lg:items-start">
         <Card>
           <CardHeader
@@ -377,18 +376,25 @@ export default function EventDetailPage() {
           )}
         </Card>
       </div>
+      )}
 
       <div className="mb-3 mt-8 flex flex-wrap items-center justify-between gap-3">
-        <Segmented
-          label="Event records"
-          value={tab}
-          onChange={setTab}
-          options={[
-            { value: "people", label: "Registrations", count: valid.length },
-            { value: "money", label: "Money", count: ledger.data?.length },
-          ]}
-        />
-        {tab === "people"
+        {f ? (
+          <Segmented
+            label="Event records"
+            value={tab}
+            onChange={setTab}
+            options={[
+              { value: "people", label: "Registrations", count: valid.length },
+              { value: "money", label: "Money", count: ledger.data?.length },
+            ]}
+          />
+        ) : (
+          <h2 className="text-[0.9375rem] font-semibold">
+            Registrations <span className="num font-medium text-muted">({valid.length})</span>
+          </h2>
+        )}
+        {tab === "people" || !f
           ? event.status === "published" &&
             event.phase !== "past" && (
               <Button variant="secondary" icon={UserPlus} onClick={() => setRegistering(true)}>
@@ -402,7 +408,7 @@ export default function EventDetailPage() {
             )}
       </div>
 
-      {tab === "people" ? (
+      {tab === "people" || !f ? (
         <Card>
           {tickets.length === 0 ? (
             <EmptyState
@@ -451,7 +457,7 @@ export default function EventDetailPage() {
                     <Td layout="actions">
                       {t.status === "valid" && event.status === "published" && (
                         <div className="flex justify-end gap-1">
-                          {t.paymentStatus === "pending" && (
+                          {canCollect && t.paymentStatus === "pending" && (
                             <Button size="sm" variant="secondary" icon={Banknote} loading={busy === `pay-${t.code}`} onClick={() => ticketAction(t, "pay")}>
                               Mark paid
                             </Button>
@@ -461,7 +467,8 @@ export default function EventDetailPage() {
                               Undo entry
                             </Button>
                           )}
-                          {canManage && !t.checkedInAt && (
+                          {/* Cancelling a paid ticket records a refund, which only the president may do. */}
+                          {(t.paymentStatus === "paid" ? canRefund : canManage) && !t.checkedInAt && (
                             <Button size="sm" variant="ghost" onClick={() => setConfirm({ cancelTicket: t })}>
                               Cancel
                             </Button>
@@ -548,6 +555,7 @@ export default function EventDetailPage() {
         {registering && (
           <DeskRegistration
             event={event}
+            canCollect={canCollect}
             onCancel={() => setRegistering(false)}
             onDone={(ticket) => {
               setRegistering(false);
@@ -613,10 +621,12 @@ export default function EventDetailPage() {
 
 function DeskRegistration({
   event,
+  canCollect,
   onDone,
   onCancel,
 }: {
-  event: EventSummary;
+  event: EventView;
+  canCollect: boolean;
   onDone: (ticket: Ticket) => void;
   onCancel: () => void;
 }) {
@@ -664,7 +674,10 @@ function DeskRegistration({
           hint={event.memberPriceCents !== event.priceCents ? "Must match the email to get the member price." : undefined}
         />
       </div>
-      {event.priceCents > 0 && (
+      {event.priceCents > 0 && !canCollect && (
+        <p className="text-sm text-muted">The ticket is added unpaid. The treasurer or the president records the payment.</p>
+      )}
+      {event.priceCents > 0 && canCollect && (
         <SelectField label="Payment" value={values.payNow} onChange={set("payNow")} hint="Choose a method only if you have the money in hand.">
           <option value="">Not paid yet</option>
           {PAYMENT_METHODS.map((m) => (

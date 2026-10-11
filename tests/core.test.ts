@@ -38,8 +38,9 @@ const tx = (overrides: Partial<TransactionInput>): TransactionInput =>
     ...overrides,
   });
 
+// The organizer runs the door; taking money at the door is the treasurer's job.
 const scan = (code: string, extra: Record<string, unknown> = {}) =>
-  checkIn({ code, eventId: null, collectPayment: false, method: "cash", ...extra }, staff.organizer);
+  checkIn({ code, eventId: null, collectPayment: false, method: "cash", ...extra }, extra.collectPayment ? staff.treasurer : staff.organizer);
 
 describe("money helpers", () => {
   it("parses typed amounts into minor units without float error", () => {
@@ -171,7 +172,7 @@ describe("registration and capacity", () => {
     expect((await appError(() => registerForEvent(event.id, person(1)))).code).toBe("registration_closed");
     expect(await listPublicEvents()).toHaveLength(0);
     setClock(null);
-    await setEventStatus(event.id, "cancelled", staff.organizer);
+    await setEventStatus(event.id, "cancelled", staff.admin);
     expect((await appError(() => registerForEvent(event.id, person(1)))).code).toBe("registration_closed");
   });
 
@@ -227,7 +228,7 @@ describe("check-in", () => {
   it("rejects unknown, malformed, wrong-event and cancelled tickets", async () => {
     const event = await publishedEvent(staff);
     const other = await publishedEvent(staff, { title: "Other Event" });
-    const ticket = await registerForEvent(event.id, person(1), { actor: staff.organizer, payNow: "cash" });
+    const ticket = await registerForEvent(event.id, person(1), { actor: staff.treasurer, payNow: "cash" });
 
     expect((await scan("SKY-22222-22222")).outcome).toBe("not_found");
     expect((await scan("not a code")).outcome).toBe("not_found");
@@ -251,10 +252,10 @@ describe("check-in", () => {
 
   it("refuses entry and records refunds when the event is cancelled", async () => {
     const event = await publishedEvent(staff);
-    const paid = await registerForEvent(event.id, person(1), { actor: staff.organizer, payNow: "cash" });
+    const paid = await registerForEvent(event.id, person(1), { actor: staff.treasurer, payNow: "cash" });
     const unpaid = await registerForEvent(event.id, person(2));
 
-    const change = await setEventStatus(event.id, "cancelled", staff.organizer);
+    const change = await setEventStatus(event.id, "cancelled", staff.admin);
     expect(change.voidedPendingCount).toBe(1);
     expect(change.refundsDueCents).toBe(50000);
     expect((await scan(paid.code)).outcome).toBe("event_cancelled");
@@ -268,7 +269,7 @@ describe("check-in", () => {
        WHERE t.status = 'valid' AND x.voided_at IS NOT NULL`,
     ))!;
     expect(orphans.n).toBe(0);
-    expect((await appError(() => payTicket(unpaid.code, "cash", staff.organizer))).status).toBe(409);
+    expect((await appError(() => payTicket(unpaid.code, "cash", staff.treasurer))).status).toBe(409);
 
     const finance = (await getEvent(event.id)).finance;
     expect(finance.incomeSettledCents).toBe(50000);
@@ -280,8 +281,8 @@ describe("check-in", () => {
 
   it("records a refund when a paid ticket is cancelled", async () => {
     const event = await publishedEvent(staff);
-    const ticket = await registerForEvent(event.id, person(1), { actor: staff.organizer, payNow: "card" });
-    expect((await cancelTicket(ticket.code, staff.organizer)).refundDueCents).toBe(50000);
+    const ticket = await registerForEvent(event.id, person(1), { actor: staff.treasurer, payNow: "card" });
+    expect((await cancelTicket(ticket.code, staff.admin)).refundDueCents).toBe(50000);
     const refund = await listTransactions({ type: "expense" });
     expect(refund).toHaveLength(1);
     expect(refund[0]).toMatchObject({ category: "refund", status: "pending", amountCents: 50000 });
@@ -315,8 +316,8 @@ describe("finance", () => {
 
   it("keeps collected and pending money apart and reconciles with the ledger", async () => {
     const gala = await publishedEvent(staff, { title: "Gala" });
-    await registerForEvent(gala.id, person(1), { actor: staff.organizer, payNow: "upi" }); // 500 collected
-    await registerForEvent(gala.id, person(2), { actor: staff.organizer, payNow: "cash" }); // 500 collected
+    await registerForEvent(gala.id, person(1), { actor: staff.treasurer, payNow: "upi" }); // 500 collected
+    await registerForEvent(gala.id, person(2), { actor: staff.treasurer, payNow: "cash" }); // 500 collected
     await registerForEvent(gala.id, person(3)); // 500 pending
     await createTransaction(tx({ type: "income", category: "sponsorship", amountCents: 200000, eventId: gala.id }), staff.treasurer);
     await createTransaction(tx({ category: "venue", amountCents: 150000, eventId: gala.id }), staff.treasurer);

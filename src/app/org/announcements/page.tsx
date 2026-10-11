@@ -27,6 +27,7 @@ import { formatDateTime } from "@/lib/dates";
 export default function AnnouncementsPage() {
   const toast = useToast();
   const canPost = useCan("manageAnnouncements");
+  const canSeeMembers = useCan("manageMembers");
   const posts = useApi<Announcement[]>("/api/announcements");
   const [values, setValues] = useState({ title: "", body: "", audience: "everyone" });
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -132,15 +133,18 @@ export default function AnnouncementsPage() {
             </Notice>
           )}
 
-          <Card className="p-5">
-            <h2 className="text-[0.9375rem] font-semibold">Reaching members by email</h2>
-            <p className="mt-1 text-sm text-muted">
-              Skyline does not send email. Copy the active members&rsquo; addresses and paste them into BCC in your own mail app.
-            </p>
-            <Button variant="secondary" icon={Copy} className="mt-3" loading={copying} onClick={copyMailingList}>
-              Copy member emails
-            </Button>
-          </Card>
+          {/* Member addresses are member records: the president and the treasurer only. */}
+          {canSeeMembers && (
+            <Card className="p-5">
+              <h2 className="text-[0.9375rem] font-semibold">Reaching members by email</h2>
+              <p className="mt-1 text-sm text-muted">
+                Skyline does not send email. Copy the active members&rsquo; addresses and paste them into BCC in your own mail app.
+              </p>
+              <Button variant="secondary" icon={Copy} className="mt-3" loading={copying} onClick={copyMailingList}>
+                Copy member emails
+              </Button>
+            </Card>
+          )}
         </div>
 
         <Card className="lg:col-span-3">

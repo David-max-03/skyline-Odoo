@@ -162,6 +162,7 @@ export const TABLES_IN_DELETE_ORDER = [
   "razorpay_webhook_events",
   "online_applications",
   "expense_claims",
+  "volunteer_requests",
   "transactions",
   "orders",
   "checkouts",

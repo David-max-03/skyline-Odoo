@@ -1,4 +1,5 @@
 import { staffRoute } from "@/server/http";
-import { getDashboard } from "@/server/services/dashboard";
+import { viewDashboard } from "@/server/services/staff-views";
 
-export const GET = staffRoute(null, {}, () => getDashboard());
+/** Every committee role; member counts and money only for roles that may see them. */
+export const GET = staffRoute(null, {}, ({ user }) => viewDashboard(user));

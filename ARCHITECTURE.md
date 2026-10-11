@@ -59,13 +59,14 @@ dates are `YYYY-MM-DD` in the organisation's timezone. The schema is in `src/ser
 
 | Table | Purpose | Notable constraints |
 |---|---|---|
-| `users`, `sessions` | Staff accounts and sign-ins | Session token stored as SHA-256; role read from `users` on every request |
+| `users`, `sessions` | Staff accounts and sign-ins | Session token stored as SHA-256; role read from `users` on every request. `disabled_at` turns an account off without deleting it |
 | `members`, `membership_periods` | People and their terms | Status is derived from terms, never stored |
 | `member_accounts`, `member_sessions` | Member passwords and sign-ins | Separate from staff tables, so a member session can only ever resolve to the role `member` |
 | `account_setup_tokens` | One-time password-setup links | Only the SHA-256 is stored; single use; 72-hour expiry; a new link revokes the old one |
 | `membership_applications` | People who say they have paid the fee | One open application per email; a UPI or bank reference can be used once. `channel` is `manual` or `razorpay` |
 | `online_applications` | Membership fees paid through Razorpay | One Razorpay order per row; a payment ID is unique, so it pays for one membership. Becomes a member only after the server verifies the payment (`src/server/services/online-applications.ts`) |
 | `order_payments`, `order_payment_lines` | Online payment attempts for merchandise | One Razorpay order per attempt and one open attempt per checkout; a verified payment settles the same ledger rows staff settle by hand (`src/server/services/order-payments.ts`) |
+| `volunteer_requests` | A member's request to help with a task; once approved, their assignment to it | One live (pending or approved) request per member per task. A task takes at most `tasks.volunteer_slots` approved volunteers, checked in the approving transaction (`src/server/services/volunteering.ts`) |
 | `razorpay_webhook_events` | Webhook deliveries that passed signature verification | Keyed by Razorpay's event ID, so a repeat delivery does nothing |
 | `expense_claims` | Reimbursement requests | Receipt photo required; one linked ledger row at most |
 | `checkouts`, `product_images` | Items bought together; product photos | `orders` rows are the lines of a checkout |
@@ -133,6 +134,15 @@ paid, a pending `refund` expense is recorded so the books show what is owed back
 - Authorisation happens twice: the route wrapper checks the role before reading the
   request body, and each service calls `requireRole` again, so a rule holds whichever
   route or script calls the service. The matrix is `CAN` in `src/lib/contracts.ts`.
+- Reading follows the same matrix as writing. Staff routes that send member records,
+  ledger data or orders read through `services/staff-views.ts`, which checks the role and
+  removes ledger figures from events and the dashboard for a role that may not see them.
+  The event organizer sees no member records and no finance, and cannot take a ticket
+  payment. Refunds (cancelling a paid ticket or paid merchandise order, paying out or
+  voiding a refund entry, marking an online order payment refunded) and
+  cancelling a whole event are the president's alone.
+- A committee account can be disabled by the president (`admin-setup.ts`): its sessions
+  are deleted, sign-in is refused, and the row stays so its history keeps an author.
 - The UI hides controls by role for convenience only. `src/proxy.ts` redirects
   signed-out visitors away from `/org/*`; it is not the security boundary.
 - Mutating requests with a foreign `Origin` header are refused.
@@ -157,8 +167,9 @@ paid, a pending `refund` expense is recorded so the books show what is owed back
 - The cart lives in the browser. It does not follow a member to another device.
 - Sign-in is rate-limited per address, not per account.
 - Product photos must be uploaded by the committee; none ship with the app.
-- One organisation per installation. No self-service password reset or account
-  management UI: accounts are created by the seed script.
+- One organisation per installation. No self-service password reset. Committee accounts
+  are created from the command line; the president can disable and re-enable them at
+  `/org/accounts` but cannot create one or change a role there.
 - Public sign-up reveals whether an email is already a member ("already on the list").
 - Rate limits are counted in the database (`rate_limits`), so they hold across server instances.
 - Upload bytes are in the database (`file_contents`) on PostgreSQL, and on disk for local SQLite.

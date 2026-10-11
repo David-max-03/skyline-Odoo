@@ -51,6 +51,7 @@ interface UserRow {
   name: string;
   role: Role;
   password_hash: string;
+  disabled_at: string | null;
 }
 
 interface MemberAccountRow {
@@ -140,7 +141,8 @@ export async function login(identifier: string, password: string): Promise<Login
     byMemberNo ? id.toUpperCase() : id.toLowerCase(),
   );
 
-  const staffOk = verifyPassword(password, staff?.password_hash ?? DUMMY_HASH) && !!staff;
+  // A disabled committee account fails exactly like a wrong password.
+  const staffOk = verifyPassword(password, staff?.password_hash ?? DUMMY_HASH) && !!staff && !staff.disabled_at;
   const memberOk = verifyPassword(password, member?.password_hash ?? DUMMY_HASH) && !!member;
   if (!staffOk && !memberOk) {
     throw new AppError("invalid_credentials", "Those sign-in details are not correct.", 401);
@@ -192,8 +194,9 @@ export async function getSessionUser(token: string | null | undefined): Promise<
     return row ? toMemberSession(row) : null;
   }
   const row = await get<UserRow>(
+    // Disabling an account deletes its sessions; the check here holds even if one were left behind.
     `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = ? AND s.expires_at > ?`,
+     WHERE s.token_hash = ? AND s.expires_at > ? AND u.disabled_at IS NULL`,
     hashToken(token),
     nowIso(),
   );

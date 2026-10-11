@@ -12,6 +12,7 @@ import type {
   TransactionStatus,
   TransactionType,
 } from "@/lib/contracts";
+import { can } from "@/lib/contracts";
 import { all, get, newId, nowIso, run, today, tx } from "../db";
 import { conflict, forbidden, invalid, notFound, requireRole } from "../errors";
 
@@ -271,15 +272,26 @@ export async function updateTransaction(
 }
 
 /** Treasurer confirms that a pending amount was collected or paid out. */
+/**
+ * A refund entry is money owed back for a cancelled ticket or order. Paying
+ * it out, or voiding it so that it is never paid, is the president's decision.
+ */
+function assertMayHandleRefund(row: Pick<TxRow, "source">, user: SessionUser): void {
+  if (row.source === "refund" && !can(user, "processRefunds")) {
+    throw forbidden("Only the president can pay out or void a refund.");
+  }
+}
+
 export async function settleTransaction(
   id: string,
   method: PaymentMethod | null,
   actor: SessionUser | null,
 ): Promise<Transaction> {
-  requireRole(actor, "admin", "treasurer");
+  const user = requireRole(actor, "admin", "treasurer");
   return tx(async () => {
     const row = await get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
     if (!row) throw notFound("Transaction");
+    assertMayHandleRefund(row, user);
     if (row.voided_at) throw conflict("voided", "A voided entry cannot be settled.");
     await applySettlement(row, method);
     return getTransaction(id);
@@ -287,10 +299,11 @@ export async function settleTransaction(
 }
 
 export async function voidTransaction(id: string, reason: string, actor: SessionUser | null): Promise<Transaction> {
-  requireRole(actor, "admin", "treasurer");
+  const user = requireRole(actor, "admin", "treasurer");
   return tx(async () => {
     const row = await get<TxRow>(`${SELECT} WHERE t.id = ?`, id);
     if (!row) throw notFound("Transaction");
+    assertMayHandleRefund(row, user);
     if (row.voided_at) throw conflict("voided", "This entry is already voided.");
     if ((row.source !== "manual" && row.source !== "refund") || row.claim_id) {
       throw conflict(

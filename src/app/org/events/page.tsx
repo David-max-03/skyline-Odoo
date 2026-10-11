@@ -23,12 +23,12 @@ import {
 } from "@/components/ui";
 import { DateBlock } from "@/components/domain";
 import { useApi } from "@/lib/api-client";
-import type { EventSummary } from "@/lib/contracts";
+import type { EventView } from "@/lib/contracts";
 import { formatDateTime } from "@/lib/dates";
 
 type Filter = "all" | "upcoming" | "past" | "draft";
 
-const matches = (e: EventSummary, filter: Filter) => {
+const matches = (e: EventView, filter: Filter) => {
   if (filter === "draft") return e.status === "draft";
   if (filter === "upcoming") return e.status === "published" && e.phase !== "past";
   if (filter === "past") return e.status === "cancelled" || (e.status === "published" && e.phase === "past");
@@ -39,7 +39,8 @@ export default function EventsPage() {
   const router = useRouter();
   const toast = useToast();
   const canManage = useCan("manageEvents");
-  const { data, error, reload } = useApi<EventSummary[]>("/api/events");
+  const canSeeResults = useCan("manageFinance");
+  const { data, error, reload } = useApi<EventView[]>("/api/events");
   const [filter, setFilter] = useState<Filter>("all");
   const [creating, setCreating] = useState(false);
 
@@ -110,7 +111,7 @@ export default function EventsPage() {
                 <Th>Status</Th>
                 <Th>Seats</Th>
                 <Th align="right">Price</Th>
-                <Th align="right">Result</Th>
+                {canSeeResults && <Th align="right">Result</Th>}
               </tr>
             </thead>
             <tbody>
@@ -156,9 +157,11 @@ export default function EventsPage() {
                       )}
                     </div>
                   </Td>
-                  <Td label="Result" align="right">
-                    <Money cents={e.finance.netCents} signed colored className="font-semibold" />
-                  </Td>
+                  {e.finance && (
+                    <Td label="Result" align="right">
+                      <Money cents={e.finance.netCents} signed colored className="font-semibold" />
+                    </Td>
+                  )}
                 </tr>
               ))}
             </tbody>

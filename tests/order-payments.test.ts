@@ -506,9 +506,12 @@ describe("manual and online payment together", () => {
     // The ₹1,000 that was not owed is on record for a refund, and cannot be paid for again meanwhile.
     const [review] = await listOrderPayments(staff.treasurer);
     expect(review).toMatchObject({ status: "needs_review", amountCents: 300000, appliedCents: 200000, razorpayPaymentId: payment.id });
-    const resolved = await resolveOrderPayment(review.id, "Refunded ₹1,000 in the dashboard", staff.treasurer);
-    expect(resolved).toMatchObject({ status: "refunded", resolvedByName: "Treasurer" });
-    expect((await thrown(() => resolveOrderPayment(review.id, "again", staff.treasurer))).code).toBe("not_in_review");
+    expect((await thrown(() => resolveOrderPayment(review.id, "Refunded ₹1,000 in the dashboard", staff.treasurer))).code).toBe("forbidden");
+    expect((await listOrderPayments(staff.treasurer))[0].status).toBe("needs_review");
+    const resolved = await resolveOrderPayment(review.id, "Refunded ₹1,000 in the dashboard", staff.admin);
+    expect(resolved.status).toBe("refunded");
+    expect(resolved.resolvedByName).toBe(staff.admin.name);
+    expect((await thrown(() => resolveOrderPayment(review.id, "again", staff.admin))).code).toBe("not_in_review");
   });
 
   it("keeps the payment records to the treasurer and president", async () => {

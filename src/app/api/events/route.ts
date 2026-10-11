@@ -1,9 +1,11 @@
 import { CAN, eventInputSchema } from "@/lib/contracts";
 import { staffRoute } from "@/server/http";
-import { createEvent, listEvents } from "@/server/services/events";
+import { createEvent } from "@/server/services/events";
+import { eventFor, viewEvents } from "@/server/services/staff-views";
 
-export const GET = staffRoute(null, {}, () => listEvents());
+/** Every committee role; ledger figures only for roles that may see the ledger. */
+export const GET = staffRoute(null, {}, ({ user }) => viewEvents(user));
 
-export const POST = staffRoute(CAN.manageEvents, { body: eventInputSchema }, ({ body, user }) =>
-  createEvent(body, user),
+export const POST = staffRoute(CAN.manageEvents, { body: eventInputSchema }, async ({ body, user }) =>
+  eventFor(await createEvent(body, user), user),
 );

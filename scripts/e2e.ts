@@ -245,6 +245,8 @@ async function main(): Promise<void> {
   await createUser({ email: "admin@e2e.example", name: "Asha Admin", role: "admin", password: PASSWORD });
   await createUser({ email: "treasurer@e2e.example", name: "Tariq Treasurer", role: "treasurer", password: PASSWORD });
   await createUser({ email: "organizer@e2e.example", name: "Omar Organizer", role: "organizer", password: PASSWORD });
+  // A second organizer whose account the president disables later on.
+  await createUser({ email: "leaver@e2e.example", name: "Lena Leaver", role: "organizer", password: PASSWORD });
   await closeDb();
 
   console.log(`Skyline end-to-end check\n  database: ${ON_POSTGRES ? "disposable PostgreSQL (127.0.0.1)" : dbPath}\n  server:   ${BASE}\n`);
@@ -354,11 +356,16 @@ async function main(): Promise<void> {
   assert.equal((await organizer.post("/api/tickets/verify", { code })).data.outcome, "payment_required");
   assert.equal((await organizer.post("/api/tickets/check-in", { code, eventId })).data.outcome, "payment_required");
   ok("an unpaid ticket is flagged and not admitted");
-  const admitted = await organizer.post("/api/tickets/check-in", { code: code.toLowerCase().replace(/-/g, " "), eventId, collectPayment: true, method: "upi" });
+  assert.equal((await organizer.post("/api/tickets/check-in", { code, eventId, collectPayment: true, method: "upi" })).status, 403);
+  assert.equal((await organizer.post(`/api/tickets/${code}`, { action: "pay", method: "cash" })).status, 403);
+  assert.equal((await organizer.post(`/api/events/${eventId}/registrations`, { name: "Desk Payer", email: "desk.payer@campus.example", payNow: "cash" })).status, 403);
+  assert.equal((await organizer.post("/api/tickets/verify", { code })).data.outcome, "payment_required");
+  ok("an organizer cannot take a ticket payment: not at the door, not on the ticket, not at the desk (403), and the ticket stays unpaid");
+  const admitted = await treasurer.post("/api/tickets/check-in", { code: code.toLowerCase().replace(/-/g, " "), eventId, collectPayment: true, method: "upi" });
   assert.equal(admitted.data.outcome, "checked_in");
   assert.equal(admitted.data.ticket.paymentStatus, "paid");
-  ok("collecting payment at the door admits the holder (code typed loosely)");
-  const again = await organizer.post("/api/tickets/check-in", { code, eventId, collectPayment: true });
+  ok("the treasurer collecting payment at the door admits the holder (code typed loosely)");
+  const again = await organizer.post("/api/tickets/check-in", { code, eventId });
   assert.equal(again.data.outcome, "already_checked_in");
   assert.equal(again.data.ticket.checkedInAt, admitted.data.ticket.checkedInAt);
   ok("a second check-in of the same ticket is rejected");
@@ -903,6 +910,56 @@ async function main(): Promise<void> {
   assert.equal((await treasurer.get("/api/order-payments")).data.length, 2);
   ok("a signed webhook pays a merchandise order once, creates no member, and payment records stay with the treasurer and president");
 
+  // --- volunteering: members ask, organizers approve ------------------------------------
+  console.log("Volunteering");
+  const helpTask = await organizer.post("/api/tasks", { title: "Staff the welcome desk", eventId, volunteerSlots: 1 });
+  assert.equal(helpTask.status, 200, JSON.stringify(helpTask.error));
+  assert.equal(helpTask.data.volunteerSlots, 1);
+  assert.equal((await anon.get("/api/me/volunteering")).status, 401);
+  assert.equal((await treasurer.get("/api/me/volunteering")).status, 403);
+  const openings = (await wandaShop.get("/api/me/volunteering")).data;
+  const opening = openings.opportunities.find((o: any) => o.taskId === helpTask.data.id);
+  assert.deepEqual([opening.needed, opening.approved, opening.pending, opening.remaining, opening.myRequest], [1, 0, 0, 1, null]);
+  ok("a member sees tasks opened to volunteers, with counts; visitors and committee accounts do not use the member list");
+
+  const wandaAsk = await wandaShop.post("/api/me/volunteering", { taskId: helpTask.data.id, memberId: "mem_someone_else", status: "approved" });
+  assert.equal(wandaAsk.status, 200, JSON.stringify(wandaAsk.error));
+  assert.equal(wandaAsk.data.status, "pending");
+  assert.equal((await wandaShop.post("/api/me/volunteering", { taskId: helpTask.data.id })).status, 409);
+  assert.equal((await wandaShop.get("/api/me/tasks")).data.length, 0);
+  const omarAsk = await omarShop.post("/api/me/volunteering", { taskId: helpTask.data.id });
+  assert.equal(omarAsk.data.status, "pending");
+  ok("asking creates a pending request, assigns nothing, and cannot be repeated or forced to approved");
+
+  const reviewPath = (id: string) => `/api/volunteer-requests/${id}`;
+  assert.equal((await wandaShop.post(reviewPath(wandaAsk.data.id), { action: "approve" })).status, 403);
+  assert.equal((await treasurer.post(reviewPath(wandaAsk.data.id), { action: "approve" })).status, 403);
+  assert.equal((await treasurer.get("/api/volunteer-requests")).status, 403);
+  assert.equal((await anon.post(reviewPath(wandaAsk.data.id), { action: "approve" })).status, 401);
+  assert.equal((await omarShop.post(`/api/me/volunteering/${wandaAsk.data.id}`, { action: "withdraw" })).status, 404);
+  assert.equal((await organizer.get("/api/volunteer-requests")).data.filter((r: any) => r.status === "pending").length, 2);
+  ok("only the president and organizers can see or decide requests; a member cannot approve their own or touch another's");
+
+  // Both approvals at once for the single position: exactly one wins.
+  const raced = await Promise.all([organizer.post(reviewPath(wandaAsk.data.id), { action: "approve" }), organizer.post(reviewPath(omarAsk.data.id), { action: "approve" })]);
+  assert.deepEqual(raced.map((r) => r.status).sort(), [200, 409]);
+  const winner = raced[0].status === 200 ? wandaShop : omarShop;
+  const loser = raced[0].status === 200 ? omarShop : wandaShop;
+  const loserRequest = raced[0].status === 200 ? omarAsk : wandaAsk;
+  assert.equal(raced.find((r) => r.status === 409)!.error?.code, "task_full");
+  assert.deepEqual((await winner.get("/api/me/tasks")).data.map((t: any) => t.id), [helpTask.data.id]);
+  assert.equal((await loser.get("/api/me/tasks")).data.length, 0);
+  const staffedTask = (await organizer.get("/api/tasks")).data.find((t: any) => t.id === helpTask.data.id);
+  assert.deepEqual([staffedTask.approvedVolunteers, staffedTask.pendingVolunteers, staffedTask.status], [1, 1, "todo"]);
+  ok("two approvals at once cannot overfill a task; the approved member gets the task, still in To do");
+
+  const rejected = await organizer.post(reviewPath(loserRequest.data.id), { action: "reject", reason: "The desk is covered." });
+  assert.equal(rejected.data.status, "rejected");
+  assert.equal((await loser.get("/api/me/volunteering")).data.requests.find((r: any) => r.id === loserRequest.data.id).reviewNote, "The desk is covered.");
+  assert.equal((await winner.call("PATCH", `/api/me/tasks/${helpTask.data.id}`, { action: "start" })).data.status, "in_progress");
+  assert.equal((await loser.call("PATCH", `/api/me/tasks/${helpTask.data.id}`, { action: "done" })).status, 404);
+  ok("a rejected member sees the reason and gets no task; the approved volunteer can progress it");
+
   // --- a session lasts across public and member pages --------------------------------
   console.log("Session persistence");
   const loginReply = await fetch(`${BASE}/api/auth/login`, {
@@ -973,6 +1030,119 @@ async function main(): Promise<void> {
   assert.equal(await whoAmI(), null);
   assert.equal((await omar.get("/api/me")).status, 401);
   ok("only signing out ends the session, and the old cookie then stops working");
+
+  // --- the committee authorization policy, over HTTP -------------------------------
+  console.log("Roles");
+  const memberAndMoney = ["/api/members", `/api/members/${memberId}`, "/api/transactions", `/api/transactions?eventId=${eventId}`, "/api/finance/summary", "/api/orders", "/api/order-payments", "/api/online-applications", "/api/applications"];
+  for (const route of memberAndMoney) {
+    assert.equal((await organizer.get(route)).status, 403, `${route} should refuse an organizer`);
+    assert.equal((await treasurer.get(route)).status, 200, `${route} should allow the treasurer`);
+    assert.equal((await admin.get(route)).status, 200, `${route} should allow the president`);
+  }
+  ok("member records, the ledger, summaries, orders and payment records: president and treasurer 200, organizer 403");
+
+  const organizerEvent = await organizer.get(`/api/events/${eventId}`);
+  assert.equal(organizerEvent.status, 200);
+  assert.equal(organizerEvent.data.event.finance, null);
+  assert.equal(organizerEvent.data.breakEven, null);
+  assert.equal(organizerEvent.data.profitTarget, null);
+  assert.ok(organizerEvent.data.tickets.length > 0);
+  assert.ok((await organizer.get("/api/events")).data.every((e: any) => e.finance === null));
+  assert.ok((await treasurer.get(`/api/events/${eventId}`)).data.event.finance.incomeSettledCents > 0);
+  const organizerHome = (await organizer.get("/api/dashboard")).data;
+  assert.equal(organizerHome.finance, null);
+  assert.equal(organizerHome.members, null);
+  assert.deepEqual(organizerHome.cashflow, []);
+  assert.ok(organizerHome.eventPerformance.every((e: any) => e.netCents === null && e.incomeSettledCents === null));
+  assert.ok(organizerHome.alerts.every((a: any) => a.kind === "overdue_tasks"));
+  assert.ok((await treasurer.get("/api/dashboard")).data.finance.incomeSettledCents > 0);
+  assert.ok(!/incomeSettledCents":\d|netCents":-?\d/.test(JSON.stringify([organizerEvent.data, organizerHome])));
+  ok("an organizer still gets events, registrations and a dashboard, with every ledger figure and member count removed");
+
+  const roleEvent = (await organizer.post("/api/events", { ...eventBody, title: "E2E Role Night", capacity: 10 })).data;
+  assert.equal(roleEvent.finance, null);
+  const published = await organizer.post(`/api/events/${roleEvent.id}/status`, { status: "published" });
+  assert.equal(published.data.event.finance, null);
+  assert.equal((await organizer.patch(`/api/events/${roleEvent.id}`, { ...eventBody, title: "E2E Role Night", capacity: 12 })).data.finance, null);
+  ok("creating, editing and publishing an event answer an organizer without ledger figures too");
+
+  const paidSeat = (await treasurer.post(`/api/events/${roleEvent.id}/registrations`, { name: "Paula Paid", email: "paula.paid@campus.example", payNow: "cash" })).data;
+  const unpaidSeat = (await organizer.post(`/api/events/${roleEvent.id}/registrations`, { name: "Uma Unpaid", email: "uma.unpaid@campus.example" })).data;
+  assert.equal(paidSeat.paymentStatus, "paid");
+  assert.equal(unpaidSeat.paymentStatus, "pending");
+  assert.equal((await organizer.post(`/api/tickets/${paidSeat.code}`, { action: "cancel" })).status, 403);
+  assert.equal((await treasurer.post(`/api/tickets/${unpaidSeat.code}`, { action: "cancel" })).status, 403);
+  assert.equal((await organizer.post(`/api/tickets/${unpaidSeat.code}`, { action: "cancel" })).data.refundDueCents, 0);
+  assert.equal((await treasurer.post(`/api/tickets/${paidSeat.code}`, { action: "cancel" })).status, 403);
+  assert.equal((await admin.post(`/api/tickets/${paidSeat.code}`, { action: "cancel" })).data.refundDueCents, paidSeat.priceCents);
+  ok("only the president cancels a paid ticket (which records a refund); an organizer cancels unpaid ones; the treasurer neither");
+  const refundEntry = (await treasurer.get(`/api/transactions?eventId=${roleEvent.id}`)).data.find((t: any) => t.source === "refund");
+  assert.equal(refundEntry.status, "pending");
+  assert.equal((await treasurer.post(`/api/transactions/${refundEntry.id}`, { action: "settle" })).status, 403);
+  assert.equal((await treasurer.post(`/api/transactions/${refundEntry.id}`, { action: "void", reason: "Not refunding" })).status, 403);
+  assert.equal((await organizer.post(`/api/transactions/${refundEntry.id}`, { action: "settle" })).status, 403);
+  assert.equal((await admin.post(`/api/transactions/${refundEntry.id}`, { action: "settle", method: "bank" })).data.status, "settled");
+  ok("only the president pays out or voids a refund; the treasurer sees it and gets 403");
+
+  const roleProduct = (
+    await treasurer.post("/api/products", { name: "E2E Role Mug", category: "other", description: "", priceCents: 30000, memberPriceCents: 25000, active: true, variants: [{ size: "One", stock: 2 }] })
+  ).data;
+  const roleOrder = await wandaShop.post("/api/me/checkout", { items: [{ variantId: roleProduct.variants[0].id, quantity: 1 }] });
+  assert.equal(roleOrder.status, 200, JSON.stringify(roleOrder.error));
+  const roleLine = roleOrder.data.lines[0].orderId;
+  assert.equal((await treasurer.post(`/api/orders/${roleLine}`, { action: "pay", method: "cash" })).data.order.paymentStatus, "paid");
+  assert.equal((await treasurer.post(`/api/orders/${roleLine}`, { action: "cancel" })).status, 403);
+  assert.equal((await organizer.post(`/api/orders/${roleLine}`, { action: "cancel" })).status, 403);
+  assert.equal((await treasurer.get("/api/orders")).data.find((o: any) => o.id === roleLine).status, "placed");
+  const cancelledOrder = await admin.post(`/api/orders/${roleLine}`, { action: "cancel" });
+  assert.equal(cancelledOrder.data.order.status, "cancelled");
+  assert.ok(cancelledOrder.data.refundDueCents > 0);
+  for (const client of [treasurer, organizer]) {
+    assert.equal((await client.post("/api/order-payments/opy_missing", { action: "refunded", note: "Refunded in the dashboard" })).status, 403);
+  }
+  assert.equal((await admin.post("/api/order-payments/opy_missing", { action: "refunded", note: "Refunded in the dashboard" })).status, 404);
+  ok("only the president cancels a paid merchandise order or marks an online order payment refunded; the treasurer and organizer get 403");
+
+  await treasurer.post(`/api/events/${roleEvent.id}/registrations`, { name: "Rita Refund", email: "rita.refund@campus.example", payNow: "cash" });
+  for (const client of [organizer, treasurer]) {
+    assert.equal((await client.post(`/api/events/${roleEvent.id}/status`, { status: "cancelled" })).status, 403);
+  }
+  assert.equal((await organizer.get(`/api/events/${roleEvent.id}`)).data.event.status, "published");
+  assert.equal((await treasurer.post("/api/events", { ...eventBody, title: "Treasurer's event" })).status, 403);
+  assert.equal((await treasurer.patch(`/api/events/${roleEvent.id}`, { ...eventBody, title: "Renamed" })).status, 403);
+  assert.equal((await treasurer.post(`/api/events/${roleEvent.id}/status`, { status: "draft" })).status, 403);
+  const cancelledEvent = await admin.post(`/api/events/${roleEvent.id}/status`, { status: "cancelled" });
+  assert.equal(cancelledEvent.data.event.status, "cancelled");
+  assert.ok(cancelledEvent.data.refundsDueCents > 0);
+  ok("only the president cancels a whole event; the organizer manages it otherwise; the treasurer cannot create, edit, publish or cancel");
+
+  for (const client of [treasurer, organizer]) {
+    assert.equal((await client.get("/api/accounts")).status, 403);
+  }
+  const accounts = (await admin.get("/api/accounts")).data;
+  assert.equal(accounts.length, 4);
+  assert.ok(!/password|hash/i.test(JSON.stringify(accounts)));
+  const leaverId = accounts.find((a: any) => a.email === "leaver@e2e.example").id;
+  const selfId = accounts.find((a: any) => a.isYou).id;
+  const leaver = await new Client().signIn("leaver@e2e.example");
+  assert.equal((await leaver.get("/api/events")).status, 200);
+  assert.equal((await treasurer.post(`/api/accounts/${leaverId}`, { action: "disable" })).status, 403);
+  assert.equal((await organizer.post(`/api/accounts/${leaverId}`, { action: "disable" })).status, 403);
+  assert.equal((await admin.post(`/api/accounts/${selfId}`, { action: "disable" })).error?.code, "own_account");
+  assert.equal((await admin.post(`/api/accounts/${leaverId}`, { action: "delete" })).status, 422);
+  ok("only the president can list or change committee accounts, and not their own");
+
+  const leaverTask = (await leaver.post("/api/tasks", { title: "Leaver's last task" })).data;
+  assert.equal((await admin.post(`/api/accounts/${leaverId}`, { action: "disable" })).data.disabledAt !== null, true);
+  assert.equal((await leaver.get("/api/events")).status, 401);
+  assert.equal((await leaver.get("/api/auth/me")).data.user, null);
+  assert.equal((await anon.post("/api/auth/login", { email: "leaver@e2e.example", password: PASSWORD })).error?.code, "invalid_credentials");
+  assert.ok((await organizer.get("/api/tasks")).data.some((t: any) => t.id === leaverTask.id));
+  ok("disabling an account ends its live session at once and stops sign-in; what it recorded stays");
+  assert.equal((await admin.post(`/api/accounts/${leaverId}`, { action: "enable" })).data.disabledAt, null);
+  assert.equal((await (await new Client().signIn("leaver@e2e.example")).get("/api/events")).status, 200);
+  assert.equal((await admin.post(`/api/accounts/${leaverId}`, { action: "disable" })).status, 200);
+  ok("enabling restores sign-in with the same password");
 
   // --- cross-site requests ---------------------------------------------------------
   const crossSite = new Client({ Origin: "https://evil.example" });

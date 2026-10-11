@@ -47,22 +47,22 @@ and no local file is used as a fallback.
 
 | Method and path | Access | Body | Returns |
 |---|---|---|---|
-| `GET /api/events` | staff | — | `EventSummary[]` |
-| `POST /api/events` | A, O | `eventInputSchema` | `EventSummary` (status `draft`) |
-| `GET /api/events/:id` | staff | — | `{ event, tickets: Ticket[], breakEven: BreakEvenAnalysis, profitTarget: ProfitTargetAnalysis \| null }` |
-| `PATCH /api/events/:id` | A, O | `eventInputSchema` | `EventSummary` |
-| `POST /api/events/:id/status` | A, O | `{ status }` | `EventStatusChange` |
-| `POST /api/events/:id/registrations` | staff | `staffRegistrationSchema` | `Ticket` |
+| `GET /api/events` | staff | — | `EventView[]` (`finance` is `null` for O) |
+| `POST /api/events` | A, O | `eventInputSchema` | `EventView` (status `draft`) |
+| `GET /api/events/:id` | staff | — | `EventDetailView`: `{ event, tickets, breakEven, profitTarget }`. For O, `event.finance`, `breakEven` and `profitTarget` are `null` |
+| `PATCH /api/events/:id` | A, O | `eventInputSchema` | `EventView` |
+| `POST /api/events/:id/status` | A, O (`cancelled`: A only) | `{ status }` | `EventStatusChange` |
+| `POST /api/events/:id/registrations` | staff (`payNow`: A, T) | `staffRegistrationSchema` | `Ticket` |
 | `POST /api/tickets/verify` | staff | `{ code, eventId? }` | `CheckInResult` (no change made) |
 | `POST /api/tickets/check-in` | staff | `checkInSchema` | `CheckInResult` |
 | `POST /api/tickets/:code` | staff¹ | `{ action: "pay" \| "cancel" \| "undo_check_in", method? }` | `{ ticket, refundDueCents }` |
 
-¹ `pay`: any staff. `cancel`, `undo_check_in`: A, O.
+¹ `pay`: A, T. `cancel`: A, O for an unpaid or free ticket; A only for a paid one, because that records a refund. `undo_check_in`: A, O.
 
 **Check-in always answers 200.** Read `outcome`:
 `checked_in`, `already_checked_in`, `payment_required`, `wrong_event`, `cancelled`,
 `event_cancelled`, `not_found`. `verify` returns `valid` where check-in would admit.
-To collect payment and admit in one step, send `collectPayment: true` and a `method`.
+To collect payment and admit in one step, send `collectPayment: true` and a `method` (A, T only; an organizer who sends it gets 403).
 Codes are accepted in any case, with or without dashes, spaces or the `SKY` prefix, or
 as a ticket URL.
 
@@ -80,14 +80,14 @@ POST /api/tickets/check-in
 
 | Method and path | Access | Body | Returns |
 |---|---|---|---|
-| `GET /api/transactions?type=&status=&category=&eventId=&voided=1` | staff | — | `Transaction[]` (`eventId=none` = not tied to an event) |
-| `POST /api/transactions` | staff² | `transactionInputSchema` | `Transaction` |
+| `GET /api/transactions?type=&status=&category=&eventId=&voided=1` | A, T | — | `Transaction[]` (`eventId=none` = not tied to an event) |
+| `POST /api/transactions` | A, T² | `transactionInputSchema` | `Transaction` |
 | `PATCH /api/transactions/:id` | A, T | `transactionInputSchema` | `Transaction` (manual entries only) |
-| `POST /api/transactions/:id` | A, T | `{ action: "settle", method? }` or `{ action: "void", reason }` | `Transaction` |
-| `GET /api/finance/summary` | staff | — | `FinanceSummary` |
-| `GET /api/dashboard` | staff | — | `Dashboard` |
+| `POST /api/transactions/:id` | A, T (a `refund` entry: A only) | `{ action: "settle", method? }` or `{ action: "void", reason }` | `Transaction` |
+| `GET /api/finance/summary` | A, T | — | `FinanceSummary` |
+| `GET /api/dashboard` | staff | — | `DashboardView`. For O: `finance` and `members` are `null`, `cashflow` is empty, money fields of `eventPerformance` are `null`, and only the `overdue_tasks` alert is sent |
 
-² Organizers may only create `type: "expense"` with `status: "pending"` (a claim).
+² An organizer gets 403 and files an expense claim instead (`POST /api/claims`).
 
 `Transaction.source` is `manual`, `ticket`, `dues`, `order` or `refund`. Only `manual`
 entries can be edited; `manual` and `refund` entries can be voided. Settling a `ticket`,
@@ -97,9 +97,9 @@ entries can be edited; `manual` and `refund` entries can be voided. Settling a `
 
 | Method and path | Access | Body | Returns |
 |---|---|---|---|
-| `GET /api/members` | staff | — | `Member[]` |
+| `GET /api/members` | A, T | — | `Member[]` |
 | `POST /api/members` | A, T | `memberInputSchema` | `Member` |
-| `GET /api/members/:id` | staff | — | `MemberDetail` (terms, tickets, orders) |
+| `GET /api/members/:id` | A, T | — | `MemberDetail` (terms, tickets, orders) |
 | `PATCH /api/members/:id` | A, T | `memberUpdateSchema` | `Member` |
 | `POST /api/members/:id` | A, T | `{ action: "renew" \| "collect_dues", duesPaid?, method? }` | `Member` |
 
@@ -122,8 +122,8 @@ entries can be edited; `manual` and `refund` entries can be voided. Settling a `
 | `POST /api/products` | A, T | `productInputSchema` | `Product` |
 | `PATCH /api/products/:id` | A, T | `productUpdateSchema` | `Product` |
 | `POST /api/products/:id` | A, T | `{ variantId, stock }` | `Product` |
-| `GET /api/orders` | staff | — | `Order[]` |
-| `POST /api/orders/:id` | A, T | `{ action: "pay" \| "fulfil" \| "cancel", method? }` | `{ order, refundDueCents }` |
+| `GET /api/orders` | A, T | — | `Order[]` |
+| `POST /api/orders/:id` | A, T | `{ action: "pay" \| "fulfil" \| "cancel", method? }`. Cancelling an order that is already paid is A only (`403` otherwise) | `{ order, refundDueCents }` |
 
 ## Public (no session)
 
@@ -179,6 +179,20 @@ whose paid term covers today; a mismatch is a `422` on `memberNo`.
 | `POST /api/me/checkout` | `{ items: [{ variantId, quantity }] }` | `ShopOrder` |
 | `GET /api/me/orders` | — | `ShopOrder[]` |
 
+## Volunteering
+
+| Method and path | Access | Body | Returns |
+|---|---|---|---|
+| `GET /api/me/volunteering` | member | — | `MemberVolunteering`: tasks open to volunteers (counts only) and the member's own requests |
+| `POST /api/me/volunteering` | member | `{ taskId }` | `MyVolunteerRequest`, always `pending`. `409` if already requested, already assigned or full |
+| `POST /api/me/volunteering/:id` | member | `{ action: "withdraw" }` | `MyVolunteerRequest`. Own pending requests only |
+| `GET /api/volunteer-requests` | A, O | — | `VolunteerRequest[]`, pending first |
+| `POST /api/volunteer-requests/:id` | A, O | `{ action: "approve" }` or `{ action: "reject", reason? }` | `VolunteerRequest`. `409 task_full` when no position remains |
+
+A task is open to volunteers when its `volunteerSlots` (set with the task, `POST`/`PUT /api/tasks`) is above 0, it is
+not done, and its event, if any, is published and not over. Positions are taken by approved volunteers only. An
+approved volunteer sees the task in `GET /api/me/tasks` and may progress it like any assignee.
+
 ## Shop
 
 | Method and path | Access | Body | Returns |
@@ -191,7 +205,7 @@ whose paid term covers today; a mismatch is a `422` on `memberNo`.
 | `POST /api/products/:id/variants` | A, T | `{ size, stock }` | `Product` |
 | `POST /api/me/orders/:code/pay` | member | `orderPaymentActionSchema`: `start`, `confirm` (Checkout result), `check`, `failed`. No amount is accepted | `OrderPaymentState`. The order is paid only after the server verifies the payment with Razorpay. `404` for an order that is not the member's |
 | `GET /api/order-payments` | A, T | — | `OrderPaymentRecord[]` (online merchandise payments; those needing a refund first) |
-| `POST /api/order-payments/:id` | A, T | `{ action: "refunded", note }` | `OrderPaymentRecord` |
+| `POST /api/order-payments/:id` | A | `{ action: "refunded", note }` | `OrderPaymentRecord` |
 
 A checkout is all-or-nothing and is priced on the server from the product rows; price,
 total and payment fields sent by a client are dropped by the schema. Every line comes
@@ -209,6 +223,37 @@ existing `POST /api/orders/:id`. `productInputSchema` and `productUpdateSchema` 
 
 `GET /api/files/:id` serves a receipt to A, T and the claimant only. `POST
 /api/transactions` is now A and T only: organizers file claims instead.
+
+## Committee accounts (president only)
+
+| Endpoint | Role | Body | Returns |
+|---|---|---|---|
+| `GET /api/accounts` | A | — | `CommitteeAccount[]` (never anything about passwords) |
+| `POST /api/accounts/:id` | A | `{ action: "disable" \| "enable" }` | `CommitteeAccount` |
+
+`disable` sets `users.disabled_at`, deletes every session of the account and stops it
+signing in (the login error is the same as for a wrong password). The row is kept, so
+ledger entries, reviews and check-ins still name their author. `enable` restores sign-in
+with the existing password. Errors: `own_account` (409, a president cannot disable
+themselves), `already_disabled`, `not_disabled` (409), `not_found` (404). Accounts are
+created only from the command line (`admin:create`, `staff:create`).
+
+## Who may read what
+
+| Data | A | T | O |
+|---|---|---|---|
+| Member records (list, one member, addresses) | yes | yes | no |
+| Ledger, finance summary, event income and costs, break-even | yes | yes | no |
+| Orders, order payments, online membership payments, applications | yes | yes | no |
+| Events, registrations, ticket payment status, tasks, volunteer requests | yes | yes¹ | yes |
+| Recording a ticket payment | yes | yes | no |
+| Cancelling a paid ticket or a paid merchandise order; paying out or voiding any refund; marking an online order payment refunded | yes | no | no |
+| Cancelling a whole event | yes | no | no |
+| Committee accounts | yes | no | no |
+
+¹ The treasurer reads events and tasks but does not approve volunteer requests.
+The staff routes that send this data read it through `src/server/services/staff-views.ts`,
+which checks the role again whatever the route declared.
 
 ## Adding an endpoint
 

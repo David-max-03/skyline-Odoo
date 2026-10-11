@@ -181,22 +181,58 @@ export interface SetupLink {
   email: string;
 }
 
-/** What each role may do. The server enforces this; the UI only reads it to hide controls. */
+/**
+ * What each role may do. The server enforces this; the UI only reads it to hide controls.
+ *
+ * Reading follows the same lists as writing: member records need `manageMembers`,
+ * the ledger and every figure derived from it need `manageFinance`, and orders
+ * need `manageMerch`. The event organizer is in none of those three.
+ */
 export const CAN = {
   manageEvents: ["admin", "organizer"],
   checkIn: ["admin", "organizer", "treasurer"],
-  collectPayment: ["admin", "organizer", "treasurer"],
+  /** Record that a ticket was paid for. Never the event organizer. */
+  collectPayment: ["admin", "treasurer"],
+  /**
+   * Refunds are the president's alone: cancelling a paid ticket or a paid
+   * merchandise order (which records a refund owed), paying out or voiding any
+   * refund entry in the ledger, and marking an online order payment refunded.
+   */
+  processRefunds: ["admin"],
+  /** Cancel a whole event. Organizers create, edit, publish and unpublish, but do not cancel. */
+  cancelEvents: ["admin"],
   manageFinance: ["admin", "treasurer"],
   fileExpenseClaim: ["admin", "treasurer", "organizer"],
   manageMembers: ["admin", "treasurer"],
   manageTasks: ["admin", "organizer", "treasurer"],
   manageAnnouncements: ["admin", "organizer"],
+  /** Approve or reject members' requests to volunteer for a task. */
+  reviewVolunteers: ["admin", "organizer"],
   manageMerch: ["admin", "treasurer"],
+  /** See, disable and re-enable committee accounts. */
+  manageAccounts: ["admin"],
 } as const satisfies Record<string, readonly Role[]>;
 
 export function can(user: SessionUser | null | undefined, action: keyof typeof CAN): boolean {
   return !!user && (CAN[action] as readonly string[]).includes(user.role);
 }
+
+/** A committee account as the president sees it. Never includes anything about the password. */
+export interface CommitteeAccount {
+  id: string;
+  name: string;
+  email: string;
+  role: Role;
+  createdAt: string;
+  /** Set while the account is disabled: it cannot sign in and has no sessions. */
+  disabledAt: string | null;
+  /** The account making the request. It cannot disable itself. */
+  isYou: boolean;
+}
+
+export const ACCOUNT_ACTIONS = ["disable", "enable"] as const;
+export const accountActionSchema = z.object({ action: z.enum(ACCOUNT_ACTIONS) });
+export type AccountAction = (typeof ACCOUNT_ACTIONS)[number];
 
 // ---------------------------------------------------------------------------
 // Payments
@@ -1016,6 +1052,9 @@ export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   done: "Done",
 };
 
+/** Most volunteers one task can ask for. */
+export const MAX_VOLUNTEER_SLOTS = 50;
+
 export const taskInputSchema = z.object({
   title: text(2, 140, "Title"),
   description: z.string().trim().max(1000, "Description is too long").default(""),
@@ -1025,6 +1064,16 @@ export const taskInputSchema = z.object({
   assigneeMemberId: idRef,
   dueOn: ymd("Due date").nullish().transform((v) => v ?? null),
   eventId: idRef,
+  /**
+   * How many members may volunteer for this task. 0 keeps it off the
+   * volunteer opportunities list; above 0 opens it to requests.
+   */
+  volunteerSlots: z
+    .number({ error: "Volunteers needed must be a number" })
+    .int("Volunteers needed must be a whole number")
+    .min(0, "Volunteers needed cannot be negative")
+    .max(MAX_VOLUNTEER_SLOTS, `At most ${MAX_VOLUNTEER_SLOTS} volunteers per task`)
+    .default(0),
 });
 export type TaskInput = z.infer<typeof taskInputSchema>;
 
@@ -1061,7 +1110,98 @@ export interface Task {
   daysOverdue: number;
   createdAt: string;
   completedAt: string | null;
+  /** Volunteers this task asks for; 0 means it is not open to volunteering. */
+  volunteerSlots: number;
+  /** Members approved to volunteer for it. Pending requests are counted separately. */
+  approvedVolunteers: number;
+  pendingVolunteers: number;
 }
+
+// ---------------------------------------------------------------------------
+// Volunteering: members ask to help with a task; an organizer or the president approves
+// ---------------------------------------------------------------------------
+
+export const VOLUNTEER_REQUEST_STATUSES = ["pending", "approved", "rejected", "withdrawn"] as const;
+export type VolunteerRequestStatus = (typeof VOLUNTEER_REQUEST_STATUSES)[number];
+export const VOLUNTEER_REQUEST_STATUS_LABELS: Record<VolunteerRequestStatus, string> = {
+  pending: "Pending approval",
+  approved: "Approved",
+  rejected: "Rejected",
+  withdrawn: "Withdrawn",
+};
+
+/** A task open to volunteers, as a member sees it. Counts only: it never names other volunteers. */
+export interface VolunteerOpportunity {
+  taskId: string;
+  title: string;
+  description: string;
+  dueOn: string | null;
+  taskStatus: TaskStatus;
+  eventId: string | null;
+  eventTitle: string | null;
+  eventStartsAt: string | null;
+  eventVenue: string | null;
+  /** Volunteers the task asks for. */
+  needed: number;
+  approved: number;
+  pending: number;
+  /** `needed - approved`, never below zero. Pending requests do not take a position. */
+  remaining: number;
+  isFull: boolean;
+  /** This member's own live request for the task, if any. */
+  myRequest: { id: string; status: VolunteerRequestStatus } | null;
+  /** The committee assigned this task to the member directly. */
+  assignedToMe: boolean;
+}
+
+/** One of the signed-in member's own requests. */
+export interface MyVolunteerRequest {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  eventTitle: string | null;
+  eventStartsAt: string | null;
+  status: VolunteerRequestStatus;
+  requestedAt: string;
+  reviewedAt: string | null;
+  /** The reason given when the request was rejected. */
+  reviewNote: string | null;
+}
+
+export interface MemberVolunteering {
+  opportunities: VolunteerOpportunity[];
+  requests: MyVolunteerRequest[];
+}
+
+export const volunteerRequestSchema = z.object({ taskId: z.string().min(1, "Choose a task") });
+export const volunteerWithdrawSchema = z.object({ action: z.literal("withdraw") });
+
+/** A request as the president and organizers see it. */
+export interface VolunteerRequest {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  eventId: string | null;
+  eventTitle: string | null;
+  eventStartsAt: string | null;
+  memberId: string;
+  memberName: string;
+  memberNo: string;
+  status: VolunteerRequestStatus;
+  requestedAt: string;
+  reviewedAt: string | null;
+  reviewedByName: string | null;
+  reviewNote: string | null;
+  needed: number;
+  approved: number;
+  remaining: number;
+}
+
+export const volunteerReviewSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("approve") }),
+  z.object({ action: z.literal("reject"), reason: optionalText(300) }),
+]);
+export type VolunteerReview = z.infer<typeof volunteerReviewSchema>;
 
 // ---------------------------------------------------------------------------
 // Announcements
@@ -1109,6 +1249,18 @@ export const PRODUCT_CATEGORY_LABELS: Record<ProductCategory, string> = {
 /** Most photos one product may have. */
 export const MAX_PRODUCT_IMAGES = 6;
 
+/**
+ * Size labels are stored in one form, so "xl", " XL " and "XL" are the same
+ * size: surrounding and repeated spaces are removed, and a short code of
+ * letters and digits (S, m, xxl, 2xl, 32) is upper-cased. A descriptive label
+ * such as "One size" keeps its capitalisation.
+ */
+export function normaliseSizeLabel(label: string): string {
+  const tidy = label.trim().replace(/\s+/g, " ");
+  return /^[a-z0-9]{1,5}$/i.test(tidy) ? tidy.toUpperCase() : tidy;
+}
+const sizeLabel = text(1, 20, "Size").transform(normaliseSizeLabel);
+
 export const productInputSchema = z
   .object({
     name: text(2, 100, "Name"),
@@ -1120,7 +1272,7 @@ export const productInputSchema = z
     variants: z
       .array(
         z.object({
-          size: text(1, 20, "Size"),
+          size: sizeLabel,
           stock: z
             .number({ error: "Stock must be a number" })
             .int("Stock must be a whole number")
@@ -1153,7 +1305,22 @@ const stockCount = z
   .max(100000, "Stock is too large");
 
 /** Add a size to an existing product. */
-export const variantInputSchema = z.object({ size: text(1, 20, "Size"), stock: stockCount });
+export const variantInputSchema = z.object({ size: sizeLabel, stock: stockCount });
+
+/**
+ * Set the counted stock of one or more existing sizes of a product. Only the
+ * sizes listed change. `expectedStock` is the count the person was looking at
+ * when they typed the new one; if it no longer matches (something was sold or
+ * cancelled meanwhile) nothing is saved, so a stale screen cannot put sold
+ * units back on the shelf.
+ */
+export const stockLevelsSchema = z.object({
+  levels: z
+    .array(z.object({ variantId: z.string().min(1), stock: stockCount, expectedStock: stockCount.optional() }))
+    .min(1, "Change at least one size")
+    .max(12, "Too many sizes"),
+});
+export type StockLevelsInput = z.infer<typeof stockLevelsSchema>;
 
 export const productUpdateSchema = z.object({
   name: text(2, 100, "Name"),
@@ -1436,6 +1603,30 @@ export interface Dashboard {
   cashflow: FinanceSummary["byMonth"];
   alerts: DashboardAlert[];
 }
+
+/**
+ * What a committee account is sent. Roles without `manageFinance` get null in
+ * place of every figure that comes from the ledger; roles without
+ * `manageMembers` get no member counts.
+ */
+export type EventView = Omit<EventSummary, "finance"> & { finance: EventFinance | null };
+
+export interface EventDetailView {
+  event: EventView;
+  tickets: Ticket[];
+  breakEven: BreakEvenAnalysis | null;
+  profitTarget: ProfitTargetAnalysis | null;
+}
+
+export type DashboardView = Omit<Dashboard, "members" | "finance" | "eventPerformance"> & {
+  members: Dashboard["members"] | null;
+  finance: FinanceTotals | null;
+  eventPerformance: (Omit<Dashboard["eventPerformance"][number], "incomeSettledCents" | "expenseSettledCents" | "netCents"> & {
+    incomeSettledCents: number | null;
+    expenseSettledCents: number | null;
+    netCents: number | null;
+  })[];
+};
 
 // ---------------------------------------------------------------------------
 // Event analysis (deterministic; shown on the event page)

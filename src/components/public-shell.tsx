@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useEffect, type ReactNode } from "react";
 import { useApi } from "@/lib/api-client";
+import { cart } from "@/lib/cart";
 import { SETTINGS, type SessionUser } from "@/lib/contracts";
 import { publicNavLinks } from "@/lib/public-nav";
 import { CartLink } from "./shop-ui";
@@ -53,6 +54,11 @@ export function PublicShell({ children }: { children: ReactNode }) {
   // The same session check the member and committee layouts use. A failed check shows the visitor menu.
   const me = useApi<{ user: SessionUser | null }>("/api/auth/me");
   const visitor = me.data ? me.data.user : me.error ? null : undefined;
+  // Once the session is known, make sure the cart on this browser is this person's.
+  const visitorId = visitor === undefined ? undefined : (visitor?.id ?? null);
+  useEffect(() => {
+    if (visitorId !== undefined) cart.syncOwner(visitorId);
+  }, [visitorId]);
   const links = publicNavLinks(visitor);
   const account = links.find((link) => link.href === "/member" || link.href === "/org");
   return (

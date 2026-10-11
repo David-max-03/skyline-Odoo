@@ -176,14 +176,15 @@ export async function seedDemoData(): Promise<SeedSummary> {
       const span = Math.max(1, plan.eventDay - plan.publishDay - 1);
       const registerDay = Math.min(plan.publishDay + 1 + Math.floor(rand() * span), -0.01);
       const payNow = i < plan.paid && input.priceCents > 0 ? method() : null;
-      await at(registerDay, () => registerForEvent(created.id, who, { actor: organizer, payNow }));
+      // The organizer registers people; only the treasurer takes their money.
+      await at(registerDay, () => registerForEvent(created.id, who, { actor: payNow ? treasurer : organizer, payNow }));
     }
     if (plan.attended !== undefined) {
       const tickets = (await listEventTickets(created.id)).reverse();
       await at(plan.eventDay + 0.02, async () => {
         for (const t of tickets.slice(0, plan.attended)) {
           // People who had not paid settle at the door, as happens in real life.
-          await checkIn({ code: t.code, eventId: created.id, collectPayment: true, method: "cash" }, organizer);
+          await checkIn({ code: t.code, eventId: created.id, collectPayment: true, method: "cash" }, treasurer);
         }
       });
     }
@@ -309,7 +310,7 @@ export async function seedDemoData(): Promise<SeedSummary> {
   const task = (title: string, assignee: string | null, due: number | null, status: "todo" | "in_progress" | "done", eventId: string | null, description = "") =>
     at(-7, async () => {
       const created = await createTask(
-        { title, description, assignee, assigneeMemberId: (assignee && memberIdByName.get(assignee)) || null, dueOn: due === null ? null : day(due), eventId },
+        { title, description, assignee, assigneeMemberId: (assignee && memberIdByName.get(assignee)) || null, dueOn: due === null ? null : day(due), eventId, volunteerSlots: 0 },
         organizer,
       );
       // Status only moves one step at a time, for seeded tasks as for everyone else.

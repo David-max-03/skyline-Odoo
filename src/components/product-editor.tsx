@@ -4,9 +4,9 @@ import { ImagePlus, Plus, Trash2 } from "lucide-react";
 import { useRef, useState, type FormEvent } from "react";
 import { DialogActions, useToast } from "./overlay";
 import { ProductPhoto } from "./shop-ui";
-import { Button, CheckboxField, FormError, SelectField, TextAreaField, TextField } from "./ui";
+import { Button, CheckboxField, FormError, SelectField, TextAreaField, TextField, cn } from "./ui";
 import { api, errorMessage, fieldErrors } from "@/lib/api-client";
-import { MAX_PRODUCT_IMAGES, PRODUCT_CATEGORIES, PRODUCT_CATEGORY_LABELS, type Product } from "@/lib/contracts";
+import { MAX_PRODUCT_IMAGES, PRODUCT_CATEGORIES, PRODUCT_CATEGORY_LABELS, normaliseSizeLabel, type Product } from "@/lib/contracts";
 import { CURRENCY, parseMoney, toInputAmount } from "@/lib/money";
 
 const SYMBOL =
@@ -14,6 +14,7 @@ const SYMBOL =
     ?.value ?? "";
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_STOCK = 100000;
 
 /**
  * Edit one product: details, whether it is on sale, its photos and its sizes.
@@ -34,6 +35,8 @@ export function ProductEditor({ product, onChanged, onClose }: { product: Produc
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [newSize, setNewSize] = useState({ size: "", stock: "0" });
+  // Stock counts typed but not yet saved, by size id. A size that is not here shows its saved count.
+  const [stockEdits, setStockEdits] = useState<Record<string, string>>({});
   const set = (key: keyof typeof values) => (e: { target: { value: string } }) =>
     setValues((v) => ({ ...v, [key]: e.target.value }));
 
@@ -85,17 +88,55 @@ export function ProductEditor({ product, onChanged, onClose }: { product: Produc
     void run("image", () => api<Product>(`/api/products/${product.id}/images`, { method: "POST", form }), "Photo added.");
   }
 
+  const changedSizes = product.variants.filter((v) => stockEdits[v.id] !== undefined && stockEdits[v.id].trim() !== String(v.stock));
+
+  async function saveStock(e: FormEvent) {
+    e.preventDefault();
+    const invalid: Record<string, string> = {};
+    const levels = changedSizes.map((v) => {
+      const typed = stockEdits[v.id].trim();
+      const stock = Number(typed);
+      if (!/^\d+$/.test(typed) || !Number.isInteger(stock) || stock > MAX_STOCK) {
+        invalid[`stock.${v.id}`] = "Enter a whole number from 0 to 100,000";
+      }
+      // `expectedStock` is the count on screen: the server refuses if it has changed since.
+      return { variantId: v.id, stock, expectedStock: v.stock };
+    });
+    if (Object.keys(invalid).length > 0) {
+      setFormError(null);
+      setErrors(invalid);
+      return;
+    }
+    if (levels.length === 0) return;
+    const saved = await run(
+      "stock",
+      () => api<Product>(`/api/products/${product.id}/variants`, { method: "PATCH", body: { levels } }),
+      levels.length === 1 ? "Stock updated." : `Stock updated for ${levels.length} sizes.`,
+    );
+    if (saved) setStockEdits({});
+  }
+
   async function addSize(e: FormEvent) {
     e.preventDefault();
-    const stock = Number(newSize.stock);
-    if (!newSize.size.trim() || !Number.isInteger(stock) || stock < 0) {
-      setErrors({ size: "Enter a size name and a whole number of stock" });
+    const size = normaliseSizeLabel(newSize.size);
+    const typed = newSize.stock.trim();
+    const stock = Number(typed);
+    const invalid: Record<string, string> = {};
+    if (!size) invalid.size = "Enter a size name";
+    else if (size.length > 20) invalid.size = "At most 20 characters";
+    else if (product.variants.some((v) => normaliseSizeLabel(v.size).toLowerCase() === size.toLowerCase())) {
+      invalid.size = `Size ${size} already exists. Change its stock above.`;
+    }
+    if (!/^\d+$/.test(typed) || stock > MAX_STOCK) invalid.stock = "Whole number, 0 to 100,000";
+    if (Object.keys(invalid).length > 0) {
+      setFormError(null);
+      setErrors(invalid);
       return;
     }
     const added = await run(
       "size",
-      () => api<Product>(`/api/products/${product.id}/variants`, { method: "POST", body: { size: newSize.size.trim(), stock } }),
-      `Size ${newSize.size.trim()} added.`,
+      () => api<Product>(`/api/products/${product.id}/variants`, { method: "POST", body: { size, stock } }),
+      `Size ${size} added.`,
     );
     if (added) setNewSize({ size: "", stock: "0" });
   }
@@ -182,9 +223,64 @@ export function ProductEditor({ product, onChanged, onClose }: { product: Produc
           Sizes
         </h3>
         <p className="text-[0.8125rem] text-muted">
-          Current sizes: {product.variants.map((v) => `${v.size} (${v.stock})`).join(", ")}. Change stock counts on the product card.
+          Set each size to the number you have counted. Orders already placed and their prices are not affected.
         </p>
-        <form onSubmit={addSize} noValidate className="mt-3 flex flex-wrap items-end gap-3">
+        <form onSubmit={saveStock} noValidate className="mt-3">
+          <ul className="grid gap-x-4 gap-y-3 sm:grid-cols-2">
+            {product.variants.map((v) => {
+              const error = errors[`stock.${v.id}`];
+              const inputId = `stock-${v.id}`;
+              return (
+                <li key={v.id}>
+                  <div className="flex items-center justify-between gap-3">
+                    <label htmlFor={inputId} className="min-w-0 break-words text-sm font-medium text-ink">
+                      {v.size}
+                      <span className="sr-only"> stock</span>
+                    </label>
+                    <input
+                      id={inputId}
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      autoComplete="off"
+                      value={stockEdits[v.id] ?? String(v.stock)}
+                      onChange={(e) => setStockEdits((edits) => ({ ...edits, [v.id]: e.target.value }))}
+                      aria-invalid={error ? true : undefined}
+                      aria-describedby={error ? `${inputId}-error` : undefined}
+                      className={cn(
+                        "h-10 w-24 shrink-0 rounded-control border bg-surface px-3 text-right text-sm tabular-nums text-ink",
+                        error ? "border-bad" : "border-line-strong",
+                      )}
+                    />
+                  </div>
+                  {error && (
+                    <p id={`${inputId}-error`} role="alert" className="mt-1 text-right text-[0.8125rem] text-bad">
+                      {error}
+                    </p>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <Button type="submit" loading={busy === "stock"} disabled={changedSizes.length === 0 || busy !== null}>
+              Save stock
+            </Button>
+            {changedSizes.length > 0 && (
+              <>
+                <Button variant="ghost" disabled={busy !== null} onClick={() => { setStockEdits({}); setErrors({}); }}>
+                  Undo changes
+                </Button>
+                <span className="text-[0.8125rem] text-muted">
+                  {changedSizes.length === 1 ? "1 size changed, not saved yet" : `${changedSizes.length} sizes changed, not saved yet`}
+                </span>
+              </>
+            )}
+          </div>
+        </form>
+
+        <h4 className="mt-5 text-sm font-semibold">Add a size</h4>
+        <form onSubmit={addSize} noValidate className="mt-2 flex flex-wrap items-end gap-3">
           <TextField label="New size" value={newSize.size} onChange={(e) => setNewSize((s) => ({ ...s, size: e.target.value }))} error={errors.size} placeholder="XXL" className="w-32" />
           <TextField label="Stock" inputMode="numeric" value={newSize.stock} onChange={(e) => setNewSize((s) => ({ ...s, stock: e.target.value }))} error={errors.stock} className="w-24" />
           <Button type="submit" variant="secondary" icon={Plus} loading={busy === "size"}>

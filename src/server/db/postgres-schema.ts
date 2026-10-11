@@ -410,6 +410,31 @@ CREATE TABLE rate_limits (
 CREATE INDEX rate_limits_reset ON rate_limits(reset_at);
 `;
 
+/** Version 2: volunteering. The same change as SQLite's version 9; see its notes for the request states. */
+const V2_VOLUNTEERING = `
+ALTER TABLE tasks ADD COLUMN volunteer_slots INTEGER NOT NULL DEFAULT 0 CHECK (volunteer_slots >= 0);
+
+CREATE TABLE volunteer_requests (
+  id           ${T} PRIMARY KEY,
+  task_id      ${T} NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  member_id    ${T} NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  status       ${T} NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','withdrawn')),
+  requested_at ${T} NOT NULL,
+  reviewed_at  ${T},
+  reviewed_by  ${T} REFERENCES users(id),
+  review_note  ${T}
+);
+-- One live request or assignment per member per task.
+CREATE UNIQUE INDEX volunteer_requests_live ON volunteer_requests(task_id, member_id) WHERE status IN ('pending','approved');
+CREATE INDEX volunteer_requests_member ON volunteer_requests(member_id);
+CREATE INDEX volunteer_requests_status ON volunteer_requests(status, requested_at);
+`;
+
+/** Version 3: a committee account can be disabled. The same change as SQLite's version 10. */
+const V3_ACCOUNT_STATUS = `
+ALTER TABLE users ADD COLUMN disabled_at ${T};
+`;
+
 export interface PostgresMigration {
   version: number;
   name: string;
@@ -418,6 +443,8 @@ export interface PostgresMigration {
 
 export const POSTGRES_MIGRATIONS: PostgresMigration[] = [
   { version: 1, name: "baseline (SQLite schema versions 1 to 8)", sql: V1_BASELINE },
+  { version: 2, name: "volunteer requests (SQLite schema version 9)", sql: V2_VOLUNTEERING },
+  { version: 3, name: "disabled committee accounts (SQLite schema version 10)", sql: V3_ACCOUNT_STATUS },
 ];
 
 /** The schema version this code needs. The server refuses to run against an older one. */
@@ -436,7 +463,7 @@ export const EXPECTED_TABLES = [
   "checkouts", "orders", "transactions", "tasks", "announcements", "member_accounts", "member_sessions",
   "account_setup_tokens", "files", "file_contents", "membership_applications", "expense_claims",
   "product_images", "online_applications", "razorpay_webhook_events", "order_payments", "order_payment_lines",
-  "rate_limits",
+  "rate_limits", "volunteer_requests",
 ] as const;
 
 /** The uniqueness rules that money, stock and identity depend on. A database missing any of them must not be used. */
@@ -446,6 +473,7 @@ export const CRITICAL_UNIQUE_INDEXES = [
   "membership_applications_reference",
   "online_applications_open_email",
   "order_payments_open",
+  "volunteer_requests_live",
 ] as const;
 
 /** Columns that must be unique: one payment, one order, one webhook event, one member number. */

@@ -30,11 +30,20 @@ interface TaskRow {
   created_at: string;
   completed_at: string | null;
   event_title: string | null;
+  volunteer_slots: number;
+  approved_volunteers: number;
+  pending_volunteers: number;
 }
 
 const SELECT = `
-  SELECT t.*, e.title AS event_title
+  SELECT t.*, e.title AS event_title,
+    (SELECT COUNT(*) FROM volunteer_requests v WHERE v.task_id = t.id AND v.status = 'approved') AS approved_volunteers,
+    (SELECT COUNT(*) FROM volunteer_requests v WHERE v.task_id = t.id AND v.status = 'pending') AS pending_volunteers
   FROM tasks t LEFT JOIN events e ON e.id = t.event_id`;
+
+/** A member may see and progress a task assigned to them directly, or one they are an approved volunteer for. */
+const IS_MINE = `(t.assignee_member_id = ? OR EXISTS (
+  SELECT 1 FROM volunteer_requests v WHERE v.task_id = t.id AND v.member_id = ? AND v.status = 'approved'))`;
 
 // Open work first, soonest deadline first; undated tasks after dated ones.
 const ORDER = "ORDER BY (t.status = 'done'), (t.due_on IS NULL), t.due_on ASC, t.created_at DESC";
@@ -56,6 +65,9 @@ function toTask(r: TaskRow, on: string): Task {
     daysOverdue,
     createdAt: r.created_at,
     completedAt: r.completed_at,
+    volunteerSlots: r.volunteer_slots,
+    approvedVolunteers: r.approved_volunteers,
+    pendingVolunteers: r.pending_volunteers,
   };
 }
 
@@ -64,10 +76,10 @@ export async function listTasks(): Promise<Task[]> {
   return (await all<TaskRow>(`${SELECT} ${ORDER}`)).map((r) => toTask(r, on));
 }
 
-/** The tasks assigned to one member. */
+/** The tasks one member is on: assigned directly, or as an approved volunteer. */
 export async function listMemberTasks(memberId: string): Promise<Task[]> {
   const on = today();
-  return (await all<TaskRow>(`${SELECT} WHERE t.assignee_member_id = ? ${ORDER}`, memberId)).map((r) => toTask(r, on));
+  return (await all<TaskRow>(`${SELECT} WHERE ${IS_MINE} ${ORDER}`, memberId, memberId)).map((r) => toTask(r, on));
 }
 
 export async function getTask(id: string): Promise<Task> {
@@ -98,8 +110,9 @@ export async function createTask(input: TaskInput, actor: SessionUser | null): P
   const id = newId("tsk");
   await run(
     `INSERT INTO tasks
-       (id, title, description, assignee, assignee_member_id, due_on, status, event_id, created_by, created_at, completed_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'todo', ?, ?, ?, NULL)`,
+       (id, title, description, assignee, assignee_member_id, due_on, status, event_id, created_by, created_at,
+        completed_at, volunteer_slots)
+     VALUES (?, ?, ?, ?, ?, ?, 'todo', ?, ?, ?, NULL, ?)`,
     id,
     input.title,
     input.description,
@@ -109,6 +122,7 @@ export async function createTask(input: TaskInput, actor: SessionUser | null): P
     input.eventId,
     user.id,
     nowIso(),
+    input.volunteerSlots ?? 0,
   );
   return getTask(id);
 }
@@ -116,20 +130,31 @@ export async function createTask(input: TaskInput, actor: SessionUser | null): P
 /** Staff only. Edits the details and the assignment; the status is left alone. */
 export async function updateTask(id: string, input: TaskInput, actor: SessionUser | null): Promise<Task> {
   requireRole(actor, "admin", "organizer", "treasurer");
-  await getTask(id);
-  await assertEvent(input.eventId);
-  const who = await resolveAssignee(input);
-  await run(
-    "UPDATE tasks SET title = ?, description = ?, assignee = ?, assignee_member_id = ?, due_on = ?, event_id = ? WHERE id = ?",
-    input.title,
-    input.description,
-    who.assignee,
-    who.memberId,
-    input.dueOn,
-    input.eventId,
-    id,
-  );
-  return getTask(id);
+  // Read and write together: the volunteer count checked here must still hold when the row is written.
+  return tx(async () => {
+    const current = await getTask(id);
+    await assertEvent(input.eventId);
+    const who = await resolveAssignee(input);
+    const slots = input.volunteerSlots ?? 0;
+    if (slots < current.approvedVolunteers) {
+      throw invalid("Check the number of volunteers.", {
+        volunteerSlots: `${current.approvedVolunteers} volunteers are already approved for this task`,
+      });
+    }
+    await run(
+      `UPDATE tasks SET title = ?, description = ?, assignee = ?, assignee_member_id = ?, due_on = ?, event_id = ?,
+              volunteer_slots = ? WHERE id = ?`,
+      input.title,
+      input.description,
+      who.assignee,
+      who.memberId,
+      input.dueOn,
+      input.eventId,
+      slots,
+      id,
+    );
+    return getTask(id);
+  });
 }
 
 const TRANSITIONS: Record<TaskAction, { from: TaskStatus; to: TaskStatus }> = {
@@ -154,7 +179,11 @@ export async function transitionTask(id: string, action: TaskAction, actor: Sess
   return tx(async () => {
     const row = await get<TaskRow>(`${SELECT} WHERE t.id = ?`, id);
     if (actor.role === "member") {
-      if (!row || !actor.memberId || row.assignee_member_id !== actor.memberId) throw notFound("Task");
+      // Assigned directly, or an approved volunteer. Anyone else is told the task does not exist.
+      const mine =
+        !!row && !!actor.memberId &&
+        !!(await get(`SELECT 1 AS mine FROM tasks t WHERE t.id = ? AND ${IS_MINE}`, id, actor.memberId, actor.memberId));
+      if (!row || !mine) throw notFound("Task");
     } else {
       requireRole(actor, "admin", "organizer", "treasurer");
       if (!row) throw notFound("Task");

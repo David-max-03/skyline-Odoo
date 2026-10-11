@@ -19,15 +19,17 @@ import {
   TextField,
   cn,
 } from "@/components/ui";
+import { VolunteerRequestsPanel } from "@/components/volunteer-requests-panel";
 import { api, errorMessage, fieldErrors, useApi } from "@/lib/api-client";
-import { TASK_NEXT_ACTION, TASK_STATUSES, TASK_STATUS_LABELS, type EventSummary, type Member, type Task } from "@/lib/contracts";
+import { TASK_NEXT_ACTION, TASK_STATUSES, TASK_STATUS_LABELS, type EventView, type Member, type Task } from "@/lib/contracts";
 import { formatDate } from "@/lib/dates";
 
 export default function TasksPage() {
   const toast = useToast();
   const canDelete = useCan("manageEvents");
+  const canReviewVolunteers = useCan("reviewVolunteers");
   const tasks = useApi<Task[]>("/api/tasks");
-  const events = useApi<EventSummary[]>("/api/events");
+  const events = useApi<EventView[]>("/api/events");
   const members = useApi<Member[]>("/api/members");
   const [eventFilter, setEventFilter] = useState("");
   const [editing, setEditing] = useState<Task | "new" | null>(null);
@@ -79,6 +81,8 @@ export default function TasksPage() {
           </Button>
         }
       />
+
+      {canReviewVolunteers && <VolunteerRequestsPanel onChanged={tasks.reload} />}
 
       {tasks.error && !tasks.data ? (
         <Card>
@@ -191,6 +195,16 @@ export default function TasksPage() {
                               </span>
                             )}
                           </div>
+                          {task.volunteerSlots > 0 && (
+                            <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[0.8125rem]">
+                              <Badge tone={task.approvedVolunteers >= task.volunteerSlots ? "ok" : "brand"}>
+                                {task.approvedVolunteers >= task.volunteerSlots
+                                  ? `Fully staffed · ${task.approvedVolunteers} of ${task.volunteerSlots}`
+                                  : `${task.approvedVolunteers} of ${task.volunteerSlots} volunteers`}
+                              </Badge>
+                              {task.pendingVolunteers > 0 && <Badge tone="warn">{task.pendingVolunteers} pending</Badge>}
+                            </p>
+                          )}
                           {task.eventTitle && <p className="mt-1.5 text-xs text-subtle">{task.eventTitle}</p>}
                           <div className="mt-3 border-t border-line pt-3">
                             {/* One action per status: Start, then Done, then Reopen. */}
@@ -257,7 +271,7 @@ function TaskForm({
   onCancel,
 }: {
   task?: Task;
-  events: EventSummary[];
+  events: EventView[];
   members: Member[];
   defaultEventId: string;
   onSaved: () => void;
@@ -270,6 +284,7 @@ function TaskForm({
     assignee: task?.assigneeMemberId ? "" : (task?.assignee ?? ""),
     assigneeMemberId: task?.assigneeMemberId ?? "",
     dueOn: task?.dueOn ?? "",
+    volunteerSlots: String(task?.volunteerSlots ?? 0),
     eventId: task?.eventId ?? defaultEventId,
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -288,6 +303,7 @@ function TaskForm({
         assignee: values.assigneeMemberId ? null : values.assignee || null,
         assigneeMemberId: values.assigneeMemberId || null,
         dueOn: values.dueOn || null,
+        volunteerSlots: Number(values.volunteerSlots.trim() || 0),
         eventId: values.eventId || null,
       };
       await api(task ? `/api/tasks/${task.id}` : "/api/tasks", { method: task ? "PUT" : "POST", body });
@@ -339,6 +355,19 @@ function TaskForm({
           ))}
         </SelectField>
       </div>
+      <TextField
+        label="Volunteers needed"
+        inputMode="numeric"
+        value={values.volunteerSlots}
+        onChange={set("volunteerSlots")}
+        error={errors.volunteerSlots}
+        hint={
+          task && task.approvedVolunteers > 0
+            ? `${task.approvedVolunteers} approved so far. 0 hides the task from members.`
+            : "Leave at 0 to keep this task off the members' volunteer list. Above 0, members can ask to help and an organizer approves."
+        }
+        className="sm:max-w-xs"
+      />
       <TextAreaField label="Notes" value={values.description} onChange={set("description")} error={errors.description} optional />
       <DialogActions>
         <Button variant="secondary" onClick={onCancel}>

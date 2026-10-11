@@ -7,6 +7,9 @@ import { MAX_QUANTITY_PER_LINE } from "./contracts";
  * The shopping cart. It lives in this browser only and holds what was chosen:
  * which size, and how many. The name and price kept beside each line are for
  * display; the server works out the real price at checkout.
+ *
+ * A cart belongs to whoever filled it. Signing out empties it, and a cart
+ * left behind by one account is never shown to another: see `syncOwner`.
  */
 export interface CartLine {
   variantId: string;
@@ -20,6 +23,8 @@ export interface CartLine {
 }
 
 const KEY = "skyline.cart.v1";
+/** The account the cart belongs to. Absent while it is a visitor's. Never a secret: an id only. */
+const OWNER_KEY = "skyline.cart.owner";
 const EMPTY: CartLine[] = [];
 const listeners = new Set<() => void>();
 let cachedRaw: string | null = null;
@@ -64,6 +69,35 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
+function readOwner(): string | null {
+  try {
+    return window.localStorage.getItem(OWNER_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeOwner(owner: string | null): void {
+  try {
+    if (owner) window.localStorage.setItem(OWNER_KEY, owner);
+    else window.localStorage.removeItem(OWNER_KEY);
+  } catch {
+    // storage blocked: nothing persists anyway
+  }
+}
+
+/**
+ * What to do with a stored cart given who is looking at it now.
+ * - It belongs to another account, or to an account and nobody is signed in:
+ *   it is not this person's, so it is emptied.
+ * - It is a visitor's and they have just signed in: it becomes theirs.
+ * - Otherwise nothing changes.
+ */
+export function reconcileOwner(storedOwner: string | null, current: string | null): { owner: string | null; clear: boolean } {
+  if (storedOwner && storedOwner !== current) return { owner: current, clear: true };
+  return { owner: current ?? storedOwner, clear: false };
+}
+
 const clamp = (quantity: number) => Math.max(1, Math.min(MAX_QUANTITY_PER_LINE, Math.floor(quantity)));
 
 export const cart = {
@@ -82,8 +116,24 @@ export const cart = {
   remove(variantId: string): void {
     write(read().filter((l) => l.variantId !== variantId));
   },
+  /** Empties the cart and forgets whose it was. Called at checkout and on sign-out. */
   clear(): void {
+    writeOwner(null);
     write([]);
+  },
+  /**
+   * Tells the cart who is looking at it: an account id, or null for a visitor.
+   * Call it whenever the session is known. A cart that belongs to someone else
+   * is emptied, so it cannot leak from one account to the next on a shared browser.
+   */
+  syncOwner(current: string | null): void {
+    const decision = reconcileOwner(readOwner(), current);
+    if (decision.clear) {
+      writeOwner(decision.owner);
+      write([]);
+    } else if (decision.owner !== readOwner()) {
+      writeOwner(decision.owner);
+    }
   },
 };
 

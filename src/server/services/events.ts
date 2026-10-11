@@ -9,8 +9,9 @@ import type {
   PublicEvent,
   SessionUser,
 } from "@/lib/contracts";
+import { can } from "@/lib/contracts";
 import { all, get, newId, now, nowIso, run, tx } from "../db";
-import { conflict, invalid, notFound, requireRole } from "../errors";
+import { conflict, forbidden, invalid, notFound, requireRole } from "../errors";
 import { emptyEventFinance, eventFinanceMap, recordTransaction } from "./finance";
 
 export interface EventRow {
@@ -186,6 +187,10 @@ export async function setEventStatus(
   actor: SessionUser | null,
 ): Promise<EventStatusChange> {
   const user = requireRole(actor, "admin", "organizer");
+  // Cancelling closes registration for good and turns every paid ticket into a refund owed.
+  if (status === "cancelled" && !can(user, "cancelEvents")) {
+    throw forbidden("Only the president can cancel an event.");
+  }
   return tx(async () => {
     const row = await get<EventRow>("SELECT * FROM events WHERE id = ?", id);
     if (!row) throw notFound("Event");

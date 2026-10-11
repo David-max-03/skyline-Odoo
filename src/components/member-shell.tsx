@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { CalendarDays, Home, IdCard, ListChecks, LogOut, Megaphone, Package, Receipt, ShoppingBag, UserRound, type LucideIcon } from "lucide-react";
+import { CalendarDays, HandHeart, Home, IdCard, ListChecks, LogOut, Megaphone, Package, Receipt, ShoppingBag, UserRound, type LucideIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api-client";
+import { cart } from "@/lib/cart";
 import { Logo } from "./public-shell";
 import { useSession } from "./session";
 import { cn } from "./ui";
@@ -24,6 +25,7 @@ export const MEMBER_NAV: NavItem[] = [
   { href: "/shop", label: "Merchandise", icon: ShoppingBag },
   { href: "/member/orders", label: "My orders", icon: Package },
   { href: "/member/tasks", label: "My tasks", icon: ListChecks },
+  { href: "/member/volunteering", label: "Volunteer", icon: HandHeart },
   { href: "/member/claims", label: "Expense claims", icon: Receipt },
   { href: "/member/announcements", label: "Announcements", icon: Megaphone },
   { href: "/member/profile", label: "Profile", icon: UserRound },
@@ -40,6 +42,8 @@ export function MemberShell({ children }: { children: ReactNode }) {
     try {
       await api("/api/auth/logout", { method: "POST" });
     } finally {
+      // The cart belongs to the account that is leaving; the next person must not find it.
+      cart.clear();
       // A full page load on purpose: it drops all client state held for the old session.
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.assign("/login");

@@ -4,6 +4,7 @@ import { CircleAlert } from "lucide-react";
 import { useState } from "react";
 import { Money } from "./domain";
 import { Dialog, DialogActions, useToast } from "./overlay";
+import { useCan } from "./session";
 import { Badge, Button, Card, CardHeader, FormError, TextAreaField } from "./ui";
 import { api, errorMessage, fieldErrors, useApi } from "@/lib/api-client";
 import type { OrderPaymentRecord } from "@/lib/contracts";
@@ -17,6 +18,7 @@ import { formatShortDateTime } from "@/lib/dates";
  */
 export function OrderPaymentsPanel() {
   const toast = useToast();
+  const canRefund = useCan("processRefunds");
   const { data, reload } = useApi<OrderPaymentRecord[]>("/api/order-payments");
   const [refunding, setRefunding] = useState<OrderPaymentRecord | null>(null);
   const [note, setNote] = useState("");
@@ -76,18 +78,22 @@ export function OrderPaymentsPanel() {
                 <Badge tone="warn" icon={CircleAlert}>
                   Refund due
                 </Badge>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => {
-                    setNote("");
-                    setErrors({});
-                    setFormError(null);
-                    setRefunding(p);
-                  }}
-                >
-                  Mark refunded
-                </Button>
+                {canRefund ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      setNote("");
+                      setErrors({});
+                      setFormError(null);
+                      setRefunding(p);
+                    }}
+                  >
+                    Mark refunded
+                  </Button>
+                ) : (
+                  <span className="text-[0.8125rem] text-muted">President records refunds</span>
+                )}
               </div>
             </li>
           ))}

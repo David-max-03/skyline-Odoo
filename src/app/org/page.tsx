@@ -38,7 +38,7 @@ import {
   cn,
 } from "@/components/ui";
 import { useApi } from "@/lib/api-client";
-import type { Dashboard } from "@/lib/contracts";
+import type { DashboardView, FinanceTotals } from "@/lib/contracts";
 import { formatDateTime, formatShortDateTime } from "@/lib/dates";
 
 /** "in 6 days", "tomorrow", "in 3 hours": wording only, the date itself is shown beside it. */
@@ -51,7 +51,7 @@ function timeUntil(iso: string, from: number): string {
 
 export default function DashboardPage() {
   const user = useSession();
-  const { data, error, loading, reload } = useApi<Dashboard>("/api/dashboard");
+  const { data, error, loading, reload } = useApi<DashboardView>("/api/dashboard");
   const [openedAt] = useState(() => Date.now());
   const today = new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(openedAt);
 
@@ -85,64 +85,23 @@ export default function DashboardPage() {
         </div>
       ) : (
         <div className={cn("space-y-5 transition-opacity duration-200", loading && "opacity-70")} aria-busy={loading}>
-          {/* The one number the committee asks for first, and what is still moving. */}
-          <section aria-labelledby="cash-heading" className="overflow-hidden rounded-card bg-night shadow-card">
-            <div className="grid lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
-              <div className="p-6 sm:p-7">
-                <h2 id="cash-heading" className="flex items-center gap-2 text-[0.8125rem] font-semibold uppercase tracking-wider !text-on-night-muted">
-                  <Wallet className="size-4 text-accent" aria-hidden />
-                  Cash position
-                </h2>
-                <p className="num mt-3 font-display text-[2.75rem] font-extrabold leading-none tracking-tight text-white sm:text-[3.25rem]">
-                  <Money cents={data.finance.netCents} />
-                </p>
-                <p className="mt-3 text-sm text-on-night-muted">
-                  <Money cents={data.finance.incomeSettledCents} className="font-medium text-on-night" /> collected,{" "}
-                  <Money cents={data.finance.expenseSettledCents} className="font-medium text-on-night" /> paid out
-                </p>
-                <Link
-                  href="/org/finance"
-                  className="mt-5 inline-flex items-center gap-1.5 rounded-control text-sm font-semibold text-white underline-offset-4 hover:underline"
-                >
-                  Open the ledger <ArrowRight className="size-4" aria-hidden />
-                </Link>
-              </div>
-              <dl className="grid grid-cols-2 gap-px border-t border-night-line bg-night-line sm:grid-cols-3 lg:border-l lg:border-t-0">
-                {[
-                  { label: "Still to collect", cents: data.finance.incomePendingCents, note: "Unpaid tickets, dues and orders", estimate: false },
-                  { label: "Still to pay", cents: data.finance.expensePendingCents, note: "Claims and refunds owed", estimate: false },
-                  { label: "If it all settles", cents: data.finance.projectedNetCents, note: "Cash position after pending items", estimate: true },
-                ].map((item) => (
-                  <div key={item.label} className={cn("bg-night px-5 py-5 sm:py-7", item.estimate && "max-sm:col-span-2")}>
-                    <dt className="text-[0.8125rem] font-medium text-on-night-muted">{item.label}</dt>
-                    <dd className="num mt-1.5 font-display text-2xl font-bold text-white">
-                      <Money cents={item.cents} />
-                    </dd>
-                    <dd className="mt-1.5 text-xs leading-snug text-on-night-muted">
-                      {item.estimate && (
-                        <span className="mr-1.5 rounded-full bg-accent/20 px-2 py-0.5 text-[0.6875rem] font-semibold text-accent">Estimate</span>
-                      )}
-                      {item.note}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          </section>
+          {data.finance && <CashPosition finance={data.finance} />}
 
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
-            <Stat
-              label="Active members"
-              icon={Users}
-              tone="ok"
-              value={
-                <>
-                  {data.members.active}
-                  <span className="text-base font-medium text-muted"> / {data.members.total}</span>
-                </>
-              }
-              detail={`${data.members.expiring} due to renew · ${data.members.unpaid} with unpaid dues`}
-            />
+          <div className={cn("grid grid-cols-2 gap-3 sm:gap-4", data.members ? "xl:grid-cols-4" : "xl:grid-cols-3")}>
+            {data.members && (
+              <Stat
+                label="Active members"
+                icon={Users}
+                tone="ok"
+                value={
+                  <>
+                    {data.members.active}
+                    <span className="text-base font-medium text-muted"> / {data.members.total}</span>
+                  </>
+                }
+                detail={`${data.members.expiring} due to renew · ${data.members.unpaid} with unpaid dues`}
+              />
+            )}
             <Stat
               label="Registrations"
               icon={Ticket}
@@ -261,10 +220,10 @@ export default function DashboardPage() {
           </div>
 
           <div className="grid gap-5 xl:grid-cols-5">
-            <Card className="xl:col-span-3">
+            <Card className={data.finance ? "xl:col-span-3" : "xl:col-span-5"}>
               <CardHeader
                 title="Event performance"
-                description="Result is collected income minus paid expenses for entries linked to the event."
+                description={data.finance ? "Result is collected income minus paid expenses for entries linked to the event." : "Seats and turnout for each event."}
                 action={
                   <LinkButton href="/org/events" variant="ghost" size="sm">
                     All events
@@ -280,7 +239,7 @@ export default function DashboardPage() {
                       <Th>Event</Th>
                       <Th>Seats</Th>
                       <Th align="right">Checked in</Th>
-                      <Th align="right">Result</Th>
+                      {data.finance && <Th align="right">Result</Th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -304,9 +263,11 @@ export default function DashboardPage() {
                         <Td label="Checked in" align="right">
                           {e.phase === "upcoming" ? <span className="text-subtle">Not started</span> : e.checkedIn}
                         </Td>
-                        <Td label="Result" align="right">
-                          <Money cents={e.netCents} signed colored className="font-semibold" />
-                        </Td>
+                        {e.netCents !== null && (
+                          <Td label="Result" align="right">
+                            <Money cents={e.netCents} signed colored className="font-semibold" />
+                          </Td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -314,19 +275,70 @@ export default function DashboardPage() {
               )}
             </Card>
 
-            <Card className="xl:col-span-2">
-              <CardHeader title="Money in and out" description="By month. Collected and paid amounts only." />
-              <div className="p-5">
-                {data.cashflow.length === 0 ? (
-                  <EmptyState icon={Wallet} title="No transactions yet" description="Record income or an expense to see it here." />
-                ) : (
-                  <CashflowChart months={data.cashflow} />
-                )}
-              </div>
-            </Card>
+            {data.finance && (
+              <Card className="xl:col-span-2">
+                <CardHeader title="Money in and out" description="By month. Collected and paid amounts only." />
+                <div className="p-5">
+                  {data.cashflow.length === 0 ? (
+                    <EmptyState icon={Wallet} title="No transactions yet" description="Record income or an expense to see it here." />
+                  ) : (
+                    <CashflowChart months={data.cashflow} />
+                  )}
+                </div>
+              </Card>
+            )}
           </div>
         </div>
       )}
     </>
+  );
+}
+
+/** The one number the committee asks for first, and what is still moving. */
+function CashPosition({ finance }: { finance: FinanceTotals }) {
+  return (
+    <section aria-labelledby="cash-heading" className="overflow-hidden rounded-card bg-night shadow-card">
+      <div className="grid lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
+        <div className="p-6 sm:p-7">
+          <h2 id="cash-heading" className="flex items-center gap-2 text-[0.8125rem] font-semibold uppercase tracking-wider !text-on-night-muted">
+            <Wallet className="size-4 text-accent" aria-hidden />
+            Cash position
+          </h2>
+          <p className="num mt-3 font-display text-[2.75rem] font-extrabold leading-none tracking-tight text-white sm:text-[3.25rem]">
+            <Money cents={finance.netCents} />
+          </p>
+          <p className="mt-3 text-sm text-on-night-muted">
+            <Money cents={finance.incomeSettledCents} className="font-medium text-on-night" /> collected,{" "}
+            <Money cents={finance.expenseSettledCents} className="font-medium text-on-night" /> paid out
+          </p>
+          <Link
+            href="/org/finance"
+            className="mt-5 inline-flex items-center gap-1.5 rounded-control text-sm font-semibold text-white underline-offset-4 hover:underline"
+          >
+            Open the ledger <ArrowRight className="size-4" aria-hidden />
+          </Link>
+        </div>
+        <dl className="grid grid-cols-2 gap-px border-t border-night-line bg-night-line sm:grid-cols-3 lg:border-l lg:border-t-0">
+          {[
+            { label: "Still to collect", cents: finance.incomePendingCents, note: "Unpaid tickets, dues and orders", estimate: false },
+            { label: "Still to pay", cents: finance.expensePendingCents, note: "Claims and refunds owed", estimate: false },
+            { label: "If it all settles", cents: finance.projectedNetCents, note: "Cash position after pending items", estimate: true },
+          ].map((item) => (
+            <div key={item.label} className={cn("bg-night px-5 py-5 sm:py-7", item.estimate && "max-sm:col-span-2")}>
+              <dt className="text-[0.8125rem] font-medium text-on-night-muted">{item.label}</dt>
+              <dd className="num mt-1.5 font-display text-2xl font-bold text-white">
+                <Money cents={item.cents} />
+              </dd>
+              <dd className="mt-1.5 text-xs leading-snug text-on-night-muted">
+                {item.estimate && (
+                  <span className="mr-1.5 rounded-full bg-accent/20 px-2 py-0.5 text-[0.6875rem] font-semibold text-accent">Estimate</span>
+                )}
+                {item.note}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </section>
   );
 }

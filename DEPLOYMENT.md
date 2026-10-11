@@ -66,6 +66,12 @@ npm run db:migrate -- --env-file .env.neon             # applies it
 npm run db:status  -- --env-file .env.neon             # checks tables, keys and uniqueness rules
 ```
 
+The schema is currently at version 3 (version 1 is the baseline; version 2 adds
+volunteer requests; version 3 adds the column that lets the president disable a
+committee account). A database at an older version must be migrated before this
+build is deployed, or every data route answers 503. One `db:migrate` run applies
+every missing version in order.
+
 `db:migrate` is safe to run again; it does nothing when the schema is current.
 Each migration and its record are one transaction, so a failure leaves nothing
 behind. The running site checks the schema version when it connects and answers

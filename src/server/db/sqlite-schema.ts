@@ -473,6 +473,47 @@ CREATE TABLE rate_limits (
 CREATE INDEX rate_limits_reset ON rate_limits(reset_at);
 `;
 
+/**
+ * Version 9: volunteering. A task the committee opens to volunteers has
+ * `volunteer_slots` above zero: that many members may be approved for it.
+ * `volunteer_requests` is a member's request to help with a task, and, once
+ * approved, their assignment to it.
+ *
+ *   pending    waiting for an organizer or the president
+ *   approved   the member is assigned: the task is in their task list
+ *   rejected   declined; the position stays open
+ *   withdrawn  the member took a pending request back
+ *
+ * A member can have one live (pending or approved) request per task.
+ */
+const SCHEMA_V9 = `
+ALTER TABLE tasks ADD COLUMN volunteer_slots INTEGER NOT NULL DEFAULT 0 CHECK (volunteer_slots >= 0);
+
+CREATE TABLE volunteer_requests (
+  id           TEXT PRIMARY KEY,
+  task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  member_id    TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','withdrawn')),
+  requested_at TEXT NOT NULL,
+  reviewed_at  TEXT,
+  reviewed_by  TEXT REFERENCES users(id),
+  review_note  TEXT
+);
+-- One live request or assignment per member per task.
+CREATE UNIQUE INDEX volunteer_requests_live ON volunteer_requests(task_id, member_id) WHERE status IN ('pending','approved');
+CREATE INDEX volunteer_requests_member ON volunteer_requests(member_id);
+CREATE INDEX volunteer_requests_status ON volunteer_requests(status, requested_at);
+`;
+
+/**
+ * Version 10: a committee account can be disabled. A disabled account cannot
+ * sign in and has no sessions, but its row stays, so everything it recorded
+ * (ledger entries, reviews, check-ins) keeps pointing at a real account.
+ */
+const SCHEMA_V10 = `
+ALTER TABLE users ADD COLUMN disabled_at TEXT;
+`;
+
 /** Applied in order; `PRAGMA user_version` records how many have run. */
 export const SQLITE_MIGRATIONS = [
   SCHEMA_V1,
@@ -483,4 +524,6 @@ export const SQLITE_MIGRATIONS = [
   SCHEMA_V6,
   SCHEMA_V7,
   SCHEMA_V8,
+  SCHEMA_V9,
+  SCHEMA_V10,
 ];

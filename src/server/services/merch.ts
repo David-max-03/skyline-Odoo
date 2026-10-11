@@ -1,5 +1,7 @@
 import {
   MAX_PRODUCT_IMAGES,
+  can,
+  normaliseSizeLabel,
   type CheckoutInput,
   type Order,
   type OrderInput,
@@ -16,7 +18,7 @@ import {
   type ShopOrder,
 } from "@/lib/contracts";
 import { all, get, newId, nowIso, randomCode, run, tx } from "../db";
-import { conflict, invalid, notFound, requireRole } from "../errors";
+import { AppError, conflict, forbidden, invalid, notFound, requireRole } from "../errors";
 import { discardFile, openFile, storeImage, type StoredFile } from "../storage";
 import { payableOnline } from "../razorpay";
 import { recordTransaction, settlePendingFor, voidPendingFor } from "./finance";
@@ -171,6 +173,10 @@ export async function updateProduct(
   return getProduct(id);
 }
 
+const MAX_STOCK = 100000;
+const validStock = (stock: unknown): stock is number =>
+  typeof stock === "number" && Number.isInteger(stock) && stock >= 0 && stock <= MAX_STOCK;
+
 /** Sets the counted stock for one size, e.g. after a delivery or a stock-take. */
 export async function setStock(
   productId: string,
@@ -178,15 +184,62 @@ export async function setStock(
   stock: number,
   actor: SessionUser | null,
 ): Promise<Product> {
+  return setStockLevels(productId, [{ variantId, stock }], actor);
+}
+
+/**
+ * Sets the counted stock of several sizes of one product at once. All of them
+ * are saved or none. Sizes that are not listed are left exactly as they are.
+ *
+ * It runs in the same kind of transaction as a checkout, so it can never
+ * interleave with one. When `expectedStock` is given and the size's stock is
+ * no longer that number, the whole update is refused: someone bought or
+ * cancelled while the screen was open, and saving the typed count would
+ * silently undo it.
+ */
+export async function setStockLevels(
+  productId: string,
+  levels: { variantId: string; stock: number; expectedStock?: number }[],
+  actor: SessionUser | null,
+): Promise<Product> {
   requireRole(actor, "admin", "treasurer");
-  const result = await run(
-    "UPDATE product_variants SET stock = ? WHERE id = ? AND product_id = ?",
-    stock,
-    variantId,
-    productId,
-  );
-  if (result.changes !== 1) throw notFound("Size");
-  return getProduct(productId);
+  // Checked here as well as in the request schema, so no caller can store a bad count.
+  const fields: Record<string, string> = {};
+  const seen = new Set<string>();
+  for (const level of levels) {
+    if (!validStock(level.stock)) fields[`stock.${level.variantId}`] = "Enter a whole number from 0 to 100,000";
+    if (seen.has(level.variantId)) fields[`stock.${level.variantId}`] = "This size is listed twice";
+    seen.add(level.variantId);
+  }
+  if (levels.length === 0) throw invalid("Change at least one size.");
+  if (Object.keys(fields).length > 0) throw invalid("Check the stock quantities.", fields);
+
+  return tx(async () => {
+    const current = new Map(
+      (await all<VariantRow>("SELECT * FROM product_variants WHERE product_id = ?", productId)).map((v) => [v.id, v]),
+    );
+    if (current.size === 0 && !(await get("SELECT 1 FROM products WHERE id = ?", productId))) throw notFound("Product");
+    const stale: Record<string, string> = {};
+    for (const level of levels) {
+      const variant = current.get(level.variantId);
+      if (!variant) throw notFound("Size");
+      if (level.expectedStock !== undefined && variant.stock !== level.expectedStock) {
+        stale[`stock.${level.variantId}`] = `This changed to ${variant.stock} while you were editing. Check it and save again.`;
+      }
+    }
+    if (Object.keys(stale).length > 0) {
+      throw new AppError("stock_changed", "Stock changed while you were editing. Nothing was saved.", 409, stale);
+    }
+    for (const level of levels) {
+      await run(
+        "UPDATE product_variants SET stock = ? WHERE id = ? AND product_id = ?",
+        level.stock,
+        level.variantId,
+        productId,
+      );
+    }
+    return getProduct(productId);
+  });
 }
 
 /** Adds a size to a product that already exists. */
@@ -196,17 +249,20 @@ export async function addVariant(
   actor: SessionUser | null,
 ): Promise<Product> {
   requireRole(actor, "admin", "treasurer");
+  const size = normaliseSizeLabel(input.size);
+  if (!size || size.length > 20) throw invalid("Check the size.", { size: "Enter a size name of up to 20 characters" });
+  if (!validStock(input.stock)) throw invalid("Check the stock.", { stock: "Enter a whole number from 0 to 100,000" });
   return tx(async () => {
     const product = await getProduct(productId);
-    if (product.variants.some((v) => v.size.toLowerCase() === input.size.toLowerCase())) {
-      throw invalid("This size already exists.", { size: "Each size must be unique" });
+    if (product.variants.some((v) => normaliseSizeLabel(v.size).toLowerCase() === size.toLowerCase())) {
+      throw invalid("This size already exists.", { size: `${product.name} already has size ${size}` });
     }
     if (product.variants.length >= 12) throw invalid("Too many sizes.", { size: "A product can have at most 12 sizes" });
     await run(
       "INSERT INTO product_variants (id, product_id, size, stock, position) VALUES (?, ?, ?, ?, ?)",
       newId("var"),
       productId,
-      input.size,
+      size,
       input.stock,
       product.variants.length,
     );
@@ -651,6 +707,10 @@ export async function actOnOrder(
     if (action === "cancel") {
       if (row.status === "fulfilled") {
         throw conflict("already_fulfilled", "This order was already handed over and cannot be cancelled.");
+      }
+      // Cancelling a paid order records a refund owed, which is the president's decision.
+      if (row.payment_status !== "pending" && !can(user, "processRefunds")) {
+        throw forbidden("This order is paid. Only the president can cancel it, because that records a refund.");
       }
       await run("UPDATE orders SET status = 'cancelled' WHERE id = ?", id);
       await run("UPDATE product_variants SET stock = stock + ? WHERE id = ?", row.quantity, row.variant_id);

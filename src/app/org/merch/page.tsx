@@ -39,6 +39,7 @@ const SYMBOL =
 export default function MerchPage() {
   const toast = useToast();
   const canManage = useCan("manageMerch");
+  const canRefund = useCan("processRefunds");
   const products = useApi<Product[]>("/api/products");
   const orders = useApi<Order[]>("/api/orders");
   const [adding, setAdding] = useState(false);
@@ -229,9 +230,11 @@ export default function MerchPage() {
                             Hand over
                           </Button>
                         )}
-                        <Button size="sm" variant="ghost" onClick={() => setCancelling(o)}>
-                          Cancel
-                        </Button>
+                        {(o.paymentStatus === "pending" || canRefund) && (
+                          <Button size="sm" variant="ghost" onClick={() => setCancelling(o)}>
+                            Cancel
+                          </Button>
+                        )}
                       </div>
                     )}
                   </Td>

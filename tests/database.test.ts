@@ -2,16 +2,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { memberInputSchema } from "@/lib/contracts";
-import { ADMIN_PASSWORD_MIN, createFirstAdmin } from "@/server/admin-setup";
+import { memberInputSchema, productInputSchema, transactionInputSchema } from "@/lib/contracts";
+import { ADMIN_PASSWORD_MIN, createCommitteeAccount, createFirstAdmin, resetAdminPassword } from "@/server/admin-setup";
 import { createUser, getSessionUser, login, logout } from "@/server/auth";
-import { all, closeDb, dbKind, get, run, tx, wipeAllData } from "@/server/db";
+import { all, closeDb, dbKind, get, run, today, tx, wipeAllData } from "@/server/db";
 import { isServerless, resolveDbConfig } from "@/server/db/config";
 import { migratePostgres, openPostgres, toPostgresSql } from "@/server/db/postgres";
 import {
   CRITICAL_UNIQUE_COLUMNS,
   CRITICAL_UNIQUE_INDEXES,
   EXPECTED_TABLES,
+  MIGRATIONS_TABLE,
   POSTGRES_MIGRATIONS,
   POSTGRES_SCHEMA_VERSION,
 } from "@/server/db/postgres-schema";
@@ -20,10 +21,15 @@ import { DatabaseUnavailableError, isDatabaseUnavailable } from "@/server/db/typ
 import { AppError } from "@/server/errors";
 import { failure } from "@/server/http";
 import { enforceRateLimit } from "@/server/rate-limit";
+import { createAnnouncement } from "@/server/services/announcements";
+import { listApplications } from "@/server/services/applications";
+import { createEvent, setEventStatus } from "@/server/services/events";
+import { createTransaction } from "@/server/services/finance";
 import { createMember, listMembers } from "@/server/services/members";
+import { createProduct, setStockLevels } from "@/server/services/merch";
 import { checkIn, registerForEvent, undoCheckIn } from "@/server/services/tickets";
 import { openFile, storeImage, storedFileIds } from "@/server/storage";
-import { appError, freshDb, onPostgres, person, publishedEvent, type Staff } from "./helpers";
+import { appError, eventInput, freshDb, onPostgres, person, publishedEvent, type Staff } from "./helpers";
 
 /**
  * The database layer itself. Everything outside the "PostgreSQL only" block
@@ -265,6 +271,96 @@ describe("the first administrator", () => {
   });
 });
 
+describe("resetting an administrator's password", () => {
+  it("changes that one account, ends its sessions, and creates nothing", async () => {
+    const before = await all<{ id: string; email: string; role: string }>("SELECT id, email, role FROM users ORDER BY email");
+    const session = await login("admin@test.example", "password-1");
+    const treasurerHash = (await get<{ h: string }>("SELECT password_hash AS h FROM users WHERE id = ?", staff.treasurer.id))!.h;
+
+    const result = await resetAdminPassword(" Admin@Test.Example ", "a-brand-new-long-password");
+    expect(result).toMatchObject({ email: "admin@test.example", sessionsEnded: 1 });
+
+    expect(await getSessionUser(session.token)).toBeNull();
+    expect((await appError(() => login("admin@test.example", "password-1"))).status).toBe(401);
+    expect((await login("admin@test.example", "a-brand-new-long-password")).user).toMatchObject({ id: staff.admin.id, role: "admin" });
+    // Same accounts as before, and nobody else's password moved.
+    expect(await all("SELECT id, email, role FROM users ORDER BY email")).toEqual(before);
+    expect((await get<{ h: string }>("SELECT password_hash AS h FROM users WHERE id = ?", staff.treasurer.id))!.h).toBe(treasurerHash);
+    expect(JSON.stringify(await all("SELECT * FROM users"))).not.toContain("a-brand-new-long-password");
+  });
+
+  it("refuses an unknown email, a non-administrator and a short password, changing nothing", async () => {
+    const hashes = () => all<{ id: string; password_hash: string }>("SELECT id, password_hash FROM users ORDER BY id");
+    const before = await hashes();
+    expect((await appError(() => resetAdminPassword("nobody@test.example", "a-brand-new-long-password"))).code).toBe("no_such_account");
+    expect((await appError(() => resetAdminPassword("treasurer@test.example", "a-brand-new-long-password"))).code).toBe("not_an_admin");
+    expect((await appError(() => resetAdminPassword("admin@test.example", "x".repeat(ADMIN_PASSWORD_MIN - 1)))).code).toBe("weak_password");
+    expect(await hashes()).toEqual(before);
+    expect((await get<{ n: number }>("SELECT COUNT(*) AS n FROM users"))!.n).toBe(3);
+  });
+});
+
+describe("a treasurer account", () => {
+  const create = (overrides: Record<string, string> = {}) =>
+    createCommitteeAccount({ email: "New.Treasurer@Club.Example", name: "New Treasurer", role: "treasurer", password: "a-long-treasurer-password", ...overrides });
+
+  it("is created with the treasurer role, can sign in, and changes no other account", async () => {
+    const before = await all("SELECT id, email, role, password_hash FROM users ORDER BY email");
+    const created = await create();
+    expect(created).toMatchObject({ email: "new.treasurer@club.example", role: "treasurer", memberId: null });
+
+    const session = await login("new.treasurer@club.example", "a-long-treasurer-password");
+    expect(session.user).toMatchObject({ id: created.id, role: "treasurer" });
+    expect((await getSessionUser(session.token))?.role).toBe("treasurer");
+    // The accounts that were there before are exactly as they were.
+    expect(await all("SELECT id, email, role, password_hash FROM users WHERE id <> ? ORDER BY email", created.id)).toEqual(before);
+    expect(JSON.stringify(await all("SELECT * FROM users"))).not.toContain("a-long-treasurer-password");
+  });
+
+  it("can do the finance, membership and merchandise work a treasurer is for", async () => {
+    const treasurer = await create();
+    const entry = await createTransaction(
+      transactionInputSchema.parse({ type: "income", category: "donation", amountCents: 25000, occurredOn: today(), description: "Alumni gift", status: "settled", method: "bank" }),
+      treasurer,
+    );
+    expect(entry).toMatchObject({ amountCents: 25000, status: "settled" });
+    expect((await createMember(member(1), treasurer)).memberNo).toBe("SKY-M-0001");
+    expect(await listApplications(treasurer)).toEqual([]);
+    const product = await createProduct(
+      productInputSchema.parse({ name: "Cap", priceCents: 30000, memberPriceCents: 25000, variants: [{ size: "M", stock: 2 }] }),
+      treasurer,
+    );
+    expect((await setStockLevels(product.id, [{ variantId: product.variants[0].id, stock: 9 }], treasurer)).variants[0].stock).toBe(9);
+  });
+
+  it("cannot do what belongs to the president and organizers", async () => {
+    const treasurer = await create();
+    expect((await appError(() => createEvent(eventInput(), treasurer))).status).toBe(403);
+    expect((await appError(() => createAnnouncement({ title: "Hello", body: "A notice for everyone.", audience: "everyone" }, treasurer))).status).toBe(403);
+    const event = await publishedEvent(staff, { priceCents: 0, memberPriceCents: 0 });
+    const ticket = await registerForEvent(event.id, person(1));
+    await checkIn({ code: ticket.code, eventId: event.id, collectPayment: false, method: "cash" }, treasurer); // check-in is allowed
+    expect((await appError(() => undoCheckIn(ticket.code, treasurer))).status).toBe(403); // undoing it is not
+    expect((await appError(() => setEventStatus(event.id, "cancelled", treasurer))).status).toBe(403);
+    // Nor can the account be turned into, or used to reset, an administrator.
+    expect((await appError(() => resetAdminPassword("new.treasurer@club.example", "another-long-password"))).code).toBe("not_an_admin");
+  });
+
+  it("cannot be used to create an administrator, a duplicate or a weak account", async () => {
+    for (const role of ["admin", "member", "owner", ""]) {
+      expect((await appError(() => create({ role, email: `x-${role || "none"}@club.example` }))).status).toBe(422);
+    }
+    await create();
+    expect((await appError(() => create({ email: "NEW.TREASURER@club.example" }))).code).toBe("email_taken");
+    expect((await appError(() => create({ email: "admin@test.example" }))).code).toBe("email_taken");
+    expect((await appError(() => create({ email: "short@club.example", password: "x".repeat(ADMIN_PASSWORD_MIN - 1) }))).code).toBe("weak_password");
+    expect((await appError(() => create({ email: "not-an-email" }))).status).toBe(422);
+    const roles = await all<{ role: string; n: number }>("SELECT role, COUNT(*) AS n FROM users GROUP BY role ORDER BY role");
+    expect(roles).toEqual([{ role: "admin", n: 1 }, { role: "organizer", n: 1 }, { role: "treasurer", n: 2 }]);
+    expect((await create({ email: "organizer2@club.example", role: "organizer" })).role).toBe("organizer");
+  });
+});
+
 describe("rate limiting", () => {
   const limit = { name: "test-bucket", max: 3, windowMs: 60_000 };
   const hit = (address: string | null) => enforceRateLimit(limit, address);
@@ -403,6 +499,54 @@ describe.runIf(onPostgres)("PostgreSQL only", () => {
     expect(await migratePostgres(url())).toEqual({ before: POSTGRES_SCHEMA_VERSION, after: POSTGRES_SCHEMA_VERSION, applied: [] });
     expect((await migratePostgres(url(), { dryRun: true })).applied).toEqual([]);
     expect((await get<{ n: number }>("SELECT COUNT(*) AS n FROM schema_migrations"))!.n).toBe(POSTGRES_MIGRATIONS.length);
+  });
+
+  it("upgrades a version-1 database that already holds records, in order, without touching them", async () => {
+    // The state of production before this build: only the baseline applied, with real rows in it.
+    const name = `skyline_upgrade_${Date.now()}`;
+    await run(`CREATE DATABASE ${name}`);
+    const pg = (await import("pg")).default;
+    const direct = new pg.Client({ connectionString: sibling(name) });
+    await direct.connect();
+    const snapshot = async () => ({
+      users: (await direct.query("SELECT id, email, name, role, password_hash, created_at FROM users ORDER BY id")).rows,
+      ledger: (await direct.query("SELECT id, type, category, amount_cents, status, occurred_on, description, source, created_by, created_at, settled_at FROM transactions ORDER BY id")).rows,
+      tasks: (await direct.query("SELECT id, title, assignee, status, created_by, created_at FROM tasks ORDER BY id")).rows,
+    });
+    try {
+      await direct.query(MIGRATIONS_TABLE);
+      await direct.query(POSTGRES_MIGRATIONS[0].sql);
+      await direct.query("INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, $1, $2)", [POSTGRES_MIGRATIONS[0].name, "2026-10-10T19:36:07.999Z"]);
+      await direct.query("INSERT INTO users (id, email, name, role, password_hash, created_at) VALUES ('usr_1', 'president@test.example', 'President', 'admin', 'scrypt$00$00', '2026-10-10T19:39:40.000Z')");
+      await direct.query(
+        `INSERT INTO transactions (id, type, category, amount_cents, status, occurred_on, description, source, created_by, created_at, settled_at)
+         VALUES ('txn_1', 'income', 'fundraiser', 1000000, 'settled', '2026-10-11', 'Fundraiser', 'manual', 'usr_1', '2026-10-10T21:10:50.834Z', '2026-10-10T21:10:50.834Z')`,
+      );
+      await direct.query("INSERT INTO tasks (id, title, assignee, status, created_by, created_at) VALUES ('tsk_1', 'Organise students', 'A volunteer', 'in_progress', 'usr_1', '2026-10-10T21:15:13.201Z')");
+      const before = await snapshot();
+
+      const dry = await migratePostgres(sibling(name), { dryRun: true });
+      expect(dry).toMatchObject({ before: 1, after: 1 });
+      expect(dry.applied.map((m) => m.version)).toEqual(POSTGRES_MIGRATIONS.slice(1).map((m) => m.version));
+      expect(await snapshot()).toEqual(before);
+      // This build refuses a database that is behind, rather than half-working on it.
+      await expect(openPostgres(sibling(name))).rejects.toMatchObject({ reason: expect.stringContaining("schema is at version 1") });
+
+      const real = await migratePostgres(sibling(name));
+      expect(real).toMatchObject({ before: 1, after: POSTGRES_SCHEMA_VERSION });
+      expect(real.applied.map((m) => m.version)).toEqual([2, 3]);
+      expect(await snapshot()).toEqual(before);
+      // The new columns arrive with the values that mean "as before": not open to volunteers, not disabled.
+      expect((await direct.query("SELECT volunteer_slots FROM tasks")).rows).toEqual([{ volunteer_slots: 0 }]);
+      expect((await direct.query("SELECT disabled_at FROM users")).rows).toEqual([{ disabled_at: null }]);
+      expect((await direct.query("SELECT COUNT(*)::int AS n FROM volunteer_requests")).rows).toEqual([{ n: 0 }]);
+      expect((await direct.query("SELECT version FROM schema_migrations ORDER BY version")).rows.map((r) => r.version)).toEqual([1, 2, 3]);
+      const upgraded = await openPostgres(sibling(name));
+      await upgraded.close();
+    } finally {
+      await direct.end();
+      await run(`DROP DATABASE ${name} WITH (FORCE)`);
+    }
   });
 
   it("builds the whole schema on an empty database, and a dry run builds nothing", async () => {

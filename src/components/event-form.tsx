@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { api, errorMessage, fieldErrors } from "@/lib/api-client";
-import type { EventSummary } from "@/lib/contracts";
+import type { EventView } from "@/lib/contracts";
 import { fromLocalInputValue, toLocalInputValue } from "@/lib/dates";
 import { CURRENCY, parseMoney, toInputAmount } from "@/lib/money";
 import { DialogActions } from "./overlay";
@@ -18,8 +18,8 @@ export function EventForm({
   onSaved,
   onCancel,
 }: {
-  event?: EventSummary;
-  onSaved: (event: EventSummary) => void;
+  event?: EventView;
+  onSaved: (event: EventView) => void;
   onCancel: () => void;
 }) {
   const [values, setValues] = useState({
@@ -75,8 +75,8 @@ export function EventForm({
         profitTargetCents,
       };
       const saved = event
-        ? await api<EventSummary>(`/api/events/${event.id}`, { method: "PATCH", body })
-        : await api<EventSummary>("/api/events", { method: "POST", body });
+        ? await api<EventView>(`/api/events/${event.id}`, { method: "PATCH", body })
+        : await api<EventView>("/api/events", { method: "POST", body });
       onSaved(saved);
     } catch (error) {
       setErrors(fieldErrors(error));

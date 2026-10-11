@@ -20,13 +20,14 @@ import {
   TextField,
   cn,
 } from "@/components/ui";
+import { useCan } from "@/components/session";
 import { api, errorMessage, useApi } from "@/lib/api-client";
 import {
   PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
   type CheckInOutcome,
   type CheckInResult,
-  type EventSummary,
+  type EventView,
   type PaymentMethod,
 } from "@/lib/contracts";
 import { formatShortDateTime } from "@/lib/dates";
@@ -50,10 +51,11 @@ interface LogEntry {
 function CheckInDesk() {
   const toast = useToast();
   const params = useSearchParams();
-  const events = useApi<EventSummary[]>("/api/events");
+  const events = useApi<EventView[]>("/api/events");
   const [chosen, setChosen] = useState<string | null>(params.get("event"));
   const [code, setCode] = useState("");
   const [method, setMethod] = useState<PaymentMethod>("cash");
+  const canCollect = useCan("collectPayment");
   const [result, setResult] = useState<CheckInResult | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [working, setWorking] = useState(false);
@@ -61,7 +63,7 @@ function CheckInDesk() {
   const formRef = useRef<HTMLFormElement>(null);
 
   const [openedAt] = useState(() => Date.now());
-  const distance = (e: EventSummary) => Math.abs(Date.parse(e.startsAt) - openedAt);
+  const distance = (e: EventView) => Math.abs(Date.parse(e.startsAt) - openedAt);
   const open = (events.data ?? []).filter((e) => e.status === "published").toSorted((a, b) => distance(a) - distance(b));
   // Default to the event closest to now: at the door that is almost always the right one.
   const eventId = chosen && open.some((e) => e.id === chosen) ? chosen : (open[0]?.id ?? null);
@@ -210,7 +212,12 @@ function CheckInDesk() {
                   )}
                 </dl>
               )}
-              {result.outcome === "payment_required" && result.ticket && (
+              {result.outcome === "payment_required" && result.ticket && !canCollect && (
+                <p className="mt-4 border-t border-ink/10 pt-4 text-sm font-medium text-ink">
+                  This ticket is not paid. Send them to the treasurer or the president; scan again once the payment is recorded.
+                </p>
+              )}
+              {result.outcome === "payment_required" && result.ticket && canCollect && (
                 <div className="mt-4 border-t border-ink/10 pt-4">
                   <p className="text-sm font-medium text-ink">
                     Collect <Money cents={result.ticket.priceCents} className="font-bold" /> before letting them in.

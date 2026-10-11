@@ -1,19 +1,21 @@
 import QRCode from "qrcode";
-import type {
-  CheckInInput,
-  CheckInOutcome,
-  CheckInResult,
-  EventStatus,
-  PaymentMethod,
-  PublicTicket,
-  RegistrationInput,
-  SessionUser,
-  Ticket,
-  TicketPaymentStatus,
-  TicketStatus,
+import {
+  CAN,
+  can,
+  type CheckInInput,
+  type CheckInOutcome,
+  type CheckInResult,
+  type EventStatus,
+  type PaymentMethod,
+  type PublicTicket,
+  type RegistrationInput,
+  type SessionUser,
+  type Ticket,
+  type TicketPaymentStatus,
+  type TicketStatus,
 } from "@/lib/contracts";
 import { all, get, newId, now, nowIso, randomCode, run, tx } from "../db";
-import { AppError, conflict, invalid, notFound, requireRole } from "../errors";
+import { AppError, conflict, forbidden, invalid, notFound, requireRole } from "../errors";
 import type { EventRow } from "./events";
 import { recordTransaction, settlePendingFor, voidPendingFor } from "./finance";
 import { findActiveMember } from "./members";
@@ -114,7 +116,8 @@ export async function registerForEvent(
   input: RegistrationInput,
   options: RegisterOptions = {},
 ): Promise<Ticket> {
-  if (options.payNow) requireRole(options.actor, "admin", "organizer", "treasurer");
+  // Taking money is the treasurer's and the president's job; anyone else registers the person unpaid.
+  if (options.payNow) requireRole(options.actor, ...CAN.collectPayment);
 
   return tx(async () => {
     const event = await get<EventRow>("SELECT * FROM events WHERE id = ?", eventId);
@@ -296,7 +299,7 @@ export async function getPublicTicket(rawCode: string): Promise<PublicTicket> {
 // --- payment and cancellation --------------------------------------------------
 
 export async function payTicket(rawCode: string, method: PaymentMethod, actor: SessionUser | null): Promise<Ticket> {
-  requireRole(actor, "admin", "organizer", "treasurer");
+  requireRole(actor, ...CAN.collectPayment);
   return tx(async () => {
     const row = await findRow(rawCode);
     if (!row) throw notFound("Ticket");
@@ -319,10 +322,19 @@ export interface TicketCancellation {
 }
 
 export async function cancelTicket(rawCode: string, actor: SessionUser | null): Promise<TicketCancellation> {
-  const user = requireRole(actor, "admin", "organizer");
+  const user = requireRole(actor, "admin", "organizer", "treasurer");
   return tx(async () => {
     const row = await findRow(rawCode);
     if (!row) throw notFound("Ticket");
+    // Cancelling a paid ticket records a refund, and refunds are the
+    // president's decision. Any other ticket is event management.
+    if (row.payment_status === "paid") {
+      if (!can(user, "processRefunds")) {
+        throw forbidden("This ticket is paid. Only the president can cancel it, because that records a refund.");
+      }
+    } else if (!can(user, "manageEvents")) {
+      throw forbidden();
+    }
     if (row.status === "cancelled") throw conflict("ticket_cancelled", "This ticket is already cancelled.");
     if (row.checked_in_at) {
       throw conflict("already_checked_in", "This ticket was already used to enter the event.");
@@ -406,6 +418,9 @@ export async function verifyTicket(rawCode: string, eventId: string | null, acto
  */
 export async function checkIn(input: CheckInInput, actor: SessionUser | null): Promise<CheckInResult> {
   const user = requireRole(actor, "admin", "organizer", "treasurer");
+  if (input.collectPayment && !can(user, "collectPayment")) {
+    throw forbidden("Only the treasurer or the president can record a ticket payment.");
+  }
   return tx(async () => {
     const row = await findRow(input.code);
     const refused = refusal(row, input.eventId);

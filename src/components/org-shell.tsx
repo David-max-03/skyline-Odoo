@@ -13,6 +13,7 @@ import {
   Receipt,
   ScanLine,
   Shirt,
+  UserCog,
   Users,
   Wallet,
   X,
@@ -20,7 +21,8 @@ import {
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "@/lib/api-client";
-import { ROLE_LABELS } from "@/lib/contracts";
+import { cart } from "@/lib/cart";
+import { ROLE_LABELS, can, type CAN } from "@/lib/contracts";
 import { Logo } from "./public-shell";
 import { useSession } from "./session";
 import { cn } from "./ui";
@@ -30,6 +32,8 @@ interface NavItem {
   label: string;
   icon: LucideIcon;
   exact?: boolean;
+  /** Shown only to roles with this permission. The server refuses the page's data to anyone else regardless. */
+  needs?: keyof typeof CAN;
 }
 
 /** Add a staff page here and it appears in the sidebar and the mobile menu. */
@@ -51,20 +55,26 @@ export const ORG_NAV: { heading: string; items: NavItem[] }[] = [
   {
     heading: "Club",
     items: [
-      { href: "/org/finance", label: "Finance", icon: Wallet },
+      { href: "/org/finance", label: "Finance", icon: Wallet, needs: "manageFinance" },
       { href: "/org/claims", label: "Expense claims", icon: Receipt },
-      { href: "/org/members", label: "Members", icon: Users },
-      { href: "/org/merch", label: "Merchandise", icon: Shirt },
+      { href: "/org/members", label: "Members", icon: Users, needs: "manageMembers" },
+      { href: "/org/merch", label: "Merchandise", icon: Shirt, needs: "manageMerch" },
       { href: "/org/announcements", label: "Announcements", icon: Megaphone },
+      { href: "/org/accounts", label: "Committee accounts", icon: UserCog, needs: "manageAccounts" },
     ],
   },
 ];
 
 function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
+  const user = useSession();
+  const groups = ORG_NAV.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => !item.needs || can(user, item.needs)),
+  })).filter((group) => group.items.length > 0);
   return (
     <nav aria-label="Committee" className="flex-1 space-y-5 overflow-y-auto px-3 py-4">
-      {ORG_NAV.map((group) => (
+      {groups.map((group) => (
         <div key={group.heading}>
           <p className="px-3 pb-1.5 text-[0.6875rem] font-semibold uppercase tracking-wider text-on-night-muted">
             {group.heading}
@@ -108,6 +118,8 @@ function AccountPanel() {
     try {
       await api("/api/auth/logout", { method: "POST" });
     } finally {
+      // The cart belongs to the account that is leaving; the next person must not find it.
+      cart.clear();
       // A full page load on purpose: it drops all client state held for the old session.
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.assign("/login");
@@ -159,8 +171,11 @@ const TABS: NavItem[] = [
   { href: "/org", label: "Home", icon: LayoutDashboard, exact: true },
   { href: "/org/events", label: "Events", icon: CalendarDays },
   { href: "/org/check-in", label: "Check-in", icon: ScanLine },
-  { href: "/org/finance", label: "Finance", icon: Wallet },
+  { href: "/org/finance", label: "Finance", icon: Wallet, needs: "manageFinance" },
 ];
+
+/** Takes the place of a tab the signed-in role cannot open. */
+const FALLBACK_TAB: NavItem = { href: "/org/tasks", label: "Tasks", icon: ListChecks };
 
 const isActive = (item: NavItem, pathname: string) =>
   item.exact ? pathname === item.href : pathname.startsWith(item.href);
@@ -170,7 +185,8 @@ export function OrgShell({ children }: { children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const pathname = usePathname();
   const user = useSession();
-  const onTabPage = TABS.some((tab) => isActive(tab, pathname));
+  const tabs = TABS.map((tab) => (tab.needs && !can(user, tab.needs) ? FALLBACK_TAB : tab));
+  const onTabPage = tabs.some((tab) => isActive(tab, pathname));
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -232,7 +248,7 @@ export function OrgShell({ children }: { children: ReactNode }) {
         aria-label="Quick navigation"
         className="no-print h-tabbar fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-night-line bg-night lg:hidden"
       >
-        {TABS.map((tab) => {
+        {tabs.map((tab) => {
           const active = isActive(tab, pathname);
           return (
             <Link

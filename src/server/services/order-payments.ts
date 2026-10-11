@@ -1,3 +1,4 @@
+import { CAN } from "@/lib/contracts";
 import type {
   OnlineCheckout,
   OrderPaymentAction,
@@ -454,9 +455,9 @@ export async function listOrderPayments(actor: SessionUser | null): Promise<Orde
   )).map(toRecord);
 }
 
-/** A reviewer records that the part of a payment that was not owed has been refunded in Razorpay. */
+/** The president records that the part of a payment that was not owed has been refunded in Razorpay. */
 export async function resolveOrderPayment(id: string, note: string, actor: SessionUser | null): Promise<OrderPaymentRecord> {
-  const user = requireRole(actor, "admin", "treasurer");
+  const user = requireRole(actor, ...CAN.processRefunds);
   const ts = nowIso();
   const updated = await run(
     `UPDATE order_payments

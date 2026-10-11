@@ -34,9 +34,9 @@ const record = (overrides: Partial<TransactionInput>) =>
 async function scenario() {
   const gala = await publishedEvent(staff, { title: "Winter Gala", capacity: 40, priceCents: 50000, memberPriceCents: 50000, profitTargetCents: 500000 });
   const mixer = await publishedEvent(staff, { title: "Freshers Mixer", capacity: 30, priceCents: 10000, memberPriceCents: 10000 });
-  for (let i = 1; i <= 3; i++) await registerForEvent(gala.id, person(i), { actor: staff.organizer, payNow: "upi" });
+  for (let i = 1; i <= 3; i++) await registerForEvent(gala.id, person(i), { actor: staff.treasurer, payNow: "upi" });
   await registerForEvent(gala.id, person(4));
-  for (let i = 1; i <= 2; i++) await registerForEvent(mixer.id, person(i), { actor: staff.organizer, payNow: "cash" });
+  for (let i = 1; i <= 2; i++) await registerForEvent(mixer.id, person(i), { actor: staff.treasurer, payNow: "cash" });
   await record({ category: "venue", amountCents: 600000, eventId: gala.id });
   await record({ category: "catering", amountCents: 400000, status: "pending", eventId: gala.id });
   await record({ type: "income", category: "sponsorship", amountCents: 200000, eventId: gala.id });

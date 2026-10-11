@@ -1,4 +1,5 @@
+import { CAN } from "@/lib/contracts";
 import { staffRoute } from "@/server/http";
-import { listOrders } from "@/server/services/merch";
+import { viewOrders } from "@/server/services/staff-views";
 
-export const GET = staffRoute(null, {}, () => listOrders());
+export const GET = staffRoute(CAN.manageMerch, {}, ({ user }) => viewOrders(user));

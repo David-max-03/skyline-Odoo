@@ -31,7 +31,7 @@ import {
 import { api, errorMessage, useApi } from "@/lib/api-client";
 import {
   CATEGORY_LABELS,
-  type EventSummary,
+  type EventView,
   type FinanceSummary,
   type Transaction,
 } from "@/lib/contracts";
@@ -49,6 +49,7 @@ function FinanceLedger() {
   const toast = useToast();
   const params = useSearchParams();
   const canManage = useCan("manageFinance");
+  const canRefund = useCan("processRefunds");
 
   const [type, setType] = useState(params.get("type") ?? "");
   const [status, setStatus] = useState(params.get("status") ?? "");
@@ -64,7 +65,7 @@ function FinanceLedger() {
 
   const summary = useApi<FinanceSummary>("/api/finance/summary");
   const ledger = useApi<Transaction[]>(`/api/transactions${query ? `?${query}` : ""}`);
-  const events = useApi<EventSummary[]>("/api/events");
+  const events = useApi<EventView[]>("/api/events");
 
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<Transaction | null>(null);
@@ -302,7 +303,10 @@ function FinanceLedger() {
                       />
                     </Td>
                     <Td layout="actions">
-                      {canManage && (
+                      {canManage && t.source === "refund" && !canRefund && t.status === "pending" && (
+                        <span className="text-xs text-muted">President pays refunds</span>
+                      )}
+                      {canManage && (t.source !== "refund" || canRefund) && (
                         <div className="flex justify-end gap-1">
                           {t.status === "pending" && (
                             <Button size="sm" variant="secondary" icon={Check} loading={busy === t.id} onClick={() => settle(t)}>

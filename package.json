@@ -16,7 +16,9 @@
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:status": "tsx scripts/db-status.ts",
     "db:import": "tsx scripts/db-import.ts",
-    "admin:create": "tsx scripts/create-admin.ts"
+    "admin:create": "tsx scripts/create-admin.ts",
+    "admin:reset-password": "tsx scripts/reset-admin-password.ts",
+    "staff:create": "tsx scripts/create-staff.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",

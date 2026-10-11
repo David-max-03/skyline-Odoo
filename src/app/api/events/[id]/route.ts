@@ -1,20 +1,14 @@
 import { CAN, eventInputSchema } from "@/lib/contracts";
 import { staffRoute } from "@/server/http";
-import { breakEvenFor, profitTargetForEvent } from "@/server/services/analysis";
-import { getEvent, updateEvent } from "@/server/services/events";
-import { listEventTickets } from "@/server/services/tickets";
+import { updateEvent } from "@/server/services/events";
+import { eventFor, viewEvent } from "@/server/services/staff-views";
 
-/** One event with its registrations and the deterministic financial analysis. */
-export const GET = staffRoute(null, {}, async ({ params }) => {
-  const event = await getEvent(params.id);
-  return {
-    event,
-    tickets: await listEventTickets(event.id),
-    breakEven: breakEvenFor(event),
-    profitTarget: event.profitTargetCents === null ? null : profitTargetForEvent(event),
-  };
-});
+/**
+ * One event with its registrations. Roles that may see the ledger also get
+ * the event's income and costs and the deterministic financial analysis.
+ */
+export const GET = staffRoute(null, {}, ({ params, user }) => viewEvent(params.id, user));
 
-export const PATCH = staffRoute(CAN.manageEvents, { body: eventInputSchema }, ({ body, params, user }) =>
-  updateEvent(params.id, body, user),
+export const PATCH = staffRoute(CAN.manageEvents, { body: eventInputSchema }, async ({ body, params, user }) =>
+  eventFor(await updateEvent(params.id, body, user), user),
 );

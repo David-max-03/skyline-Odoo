@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { MAX_PRODUCT_IMAGES, checkoutInputSchema, memberCheckoutSchema, memberInputSchema, productInputSchema, type Product } from "@/lib/contracts";
+import {
+  MAX_PRODUCT_IMAGES,
+  checkoutInputSchema,
+  memberCheckoutSchema,
+  memberInputSchema,
+  normaliseSizeLabel,
+  productInputSchema,
+  stockLevelsSchema,
+  variantInputSchema,
+  type Product,
+} from "@/lib/contracts";
 import { addDays } from "@/lib/dates";
 import { get, setClock, today } from "@/server/db";
 import { readEvidence } from "@/server/services/applications";
@@ -19,6 +29,8 @@ import {
   listPublicProducts,
   readProductImage,
   removeProductImage,
+  setStock,
+  setStockLevels,
   updateProduct,
 } from "@/server/services/merch";
 import { storedFileIds } from "@/server/storage";
@@ -103,6 +115,140 @@ describe("the catalogue", () => {
     expect((await appError(() => readEvidence(fileId, staff.treasurer))).status).toBe(404);
     expect((await appError(() => readProductImage("fil_notaproductphoto"))).status).toBe(404);
     expect((await appError(() => readProductImage("../skyline.db"))).status).toBe(404);
+  });
+});
+
+describe("stock for existing sizes", () => {
+  const sizes = async (p: Product) => Object.fromEntries((await getProduct(p.id)).variants.map((v) => [v.size, v.stock]));
+
+  it("sets several sizes at once and leaves the ones not listed alone", async () => {
+    const tee = await product({ name: "Tee", variants: [{ size: "S", stock: 10 }, { size: "M", stock: 0 }, { size: "L", stock: 0 }, { size: "XL", stock: 0 }] });
+    const ids = tee.variants.map((v) => v.id);
+    const updated = await setStockLevels(
+      tee.id,
+      [{ variantId: size(tee, "M"), stock: 10 }, { variantId: size(tee, "L"), stock: 15 }, { variantId: size(tee, "XL"), stock: 5 }],
+      staff.treasurer,
+    );
+    expect(Object.fromEntries(updated.variants.map((v) => [v.size, v.stock]))).toEqual({ S: 10, M: 10, L: 15, XL: 5 });
+    // Same product and the same sizes: nothing was deleted and recreated.
+    expect(updated.id).toBe(tee.id);
+    expect(updated.variants.map((v) => v.id)).toEqual(ids);
+    expect((await listPublicProducts()).find((p) => p.id === tee.id)!.variants.map((v) => v.inStock)).toEqual([true, true, true, true]);
+  });
+
+  it("validates every quantity on the server and saves none of them if one is wrong", async () => {
+    const tee = await product({ variants: [{ size: "M", stock: 3 }, { size: "L", stock: 1 }] });
+    const m = size(tee, "M");
+    const l = size(tee, "L");
+    for (const bad of [-1, 1.5, 100001, Number.NaN, "7" as unknown as number]) {
+      const error = await appError(() => setStockLevels(tee.id, [{ variantId: m, stock: 9 }, { variantId: l, stock: bad }], staff.treasurer));
+      expect(error.status).toBe(422);
+      expect(error.fields?.[`stock.${l}`]).toBeTruthy();
+    }
+    expect((await appError(() => setStock(tee.id, m, -5, staff.treasurer))).status).toBe(422);
+    expect((await appError(() => setStockLevels(tee.id, [], staff.treasurer))).status).toBe(422);
+    expect((await appError(() => setStockLevels(tee.id, [{ variantId: m, stock: 1 }, { variantId: m, stock: 2 }], staff.treasurer))).status).toBe(422);
+    expect(await sizes(tee)).toEqual({ M: 3, L: 1 });
+
+    // The request schema says the same thing.
+    expect(stockLevelsSchema.safeParse({ levels: [{ variantId: m, stock: -1 }] }).success).toBe(false);
+    expect(stockLevelsSchema.safeParse({ levels: [{ variantId: m, stock: 2.5 }] }).success).toBe(false);
+    expect(stockLevelsSchema.safeParse({ levels: [] }).success).toBe(false);
+    expect(stockLevelsSchema.safeParse({ levels: [{ variantId: m, stock: 0, expectedStock: 3 }] }).success).toBe(true);
+  });
+
+  it("refuses a size that belongs to another product or does not exist", async () => {
+    const tee = await product({ name: "Tee", variants: [{ size: "M", stock: 3 }] });
+    const cap = await product({ name: "Cap", variants: [{ size: "M", stock: 8 }] });
+    expect((await appError(() => setStockLevels(tee.id, [{ variantId: size(cap, "M"), stock: 99 }], staff.treasurer))).status).toBe(404);
+    expect((await appError(() => setStockLevels(tee.id, [{ variantId: "var_missing", stock: 1 }], staff.treasurer))).status).toBe(404);
+    expect((await appError(() => setStockLevels("prd_missing", [{ variantId: size(tee, "M"), stock: 1 }], staff.treasurer))).status).toBe(404);
+    expect(await sizes(cap)).toEqual({ M: 8 });
+    expect(await sizes(tee)).toEqual({ M: 3 });
+  });
+
+  it("is only for the treasurer and president", async () => {
+    const tee = await product({ variants: [{ size: "M", stock: 3 }] });
+    const levels = [{ variantId: size(tee, "M"), stock: 50 }];
+    const signedInMember: typeof staff.admin = { ...staff.organizer, role: "member" };
+    expect((await appError(() => setStockLevels(tee.id, levels, staff.organizer))).status).toBe(403);
+    expect((await appError(() => setStockLevels(tee.id, levels, signedInMember))).status).toBe(403);
+    expect((await appError(() => setStockLevels(tee.id, levels, null))).status).toBe(401);
+    expect(await sizes(tee)).toEqual({ M: 3 });
+    expect((await setStockLevels(tee.id, levels, staff.admin)).variants[0].stock).toBe(50);
+  });
+
+  it("leaves existing orders, their prices and the ledger exactly as they were", async () => {
+    const tee = await product({ variants: [{ size: "M", stock: 3 }] });
+    const buyer = await member(1);
+    const order = await checkoutAsMember([{ variantId: size(tee, "M"), quantity: 2 }], buyer.id);
+    const before = JSON.stringify([await listOrders(), await listTransactions(), await get("SELECT * FROM products WHERE id = ?", tee.id)]);
+
+    await setStockLevels(tee.id, [{ variantId: size(tee, "M"), stock: 40, expectedStock: 1 }], staff.treasurer);
+    expect(await sizes(tee)).toEqual({ M: 40 });
+    expect(JSON.stringify([await listOrders(), await listTransactions(), await get("SELECT * FROM products WHERE id = ?", tee.id)])).toBe(before);
+    expect((await listMemberOrders(buyer.id))[0]).toMatchObject({ code: order.code, totalCents: 200000 });
+  });
+
+  it("does not put sold units back when the count on screen is out of date", async () => {
+    const tee = await product({ variants: [{ size: "M", stock: 3 }, { size: "L", stock: 4 }] });
+    const m = size(tee, "M");
+    // The treasurer opened the editor (M shows 3); then someone bought one.
+    await checkout(guest([{ variantId: m, quantity: 1 }]));
+    const error = await appError(() =>
+      setStockLevels(tee.id, [{ variantId: m, stock: 3, expectedStock: 3 }, { variantId: size(tee, "L"), stock: 9, expectedStock: 4 }], staff.treasurer),
+    );
+    expect(error).toMatchObject({ code: "stock_changed", status: 409 });
+    expect(error.fields?.[`stock.${m}`]).toContain("2");
+    expect(await sizes(tee)).toEqual({ M: 2, L: 4 }); // neither size was saved
+    await setStockLevels(tee.id, [{ variantId: m, stock: 3, expectedStock: 2 }], staff.treasurer);
+    expect(await sizes(tee)).toEqual({ M: 3, L: 4 });
+  });
+
+  it("cannot be raced into overselling by simultaneous buyers and a stock change", async () => {
+    const tee = await product({ variants: [{ size: "M", stock: 2 }] });
+    const m = size(tee, "M");
+    const outcomes = await Promise.all([
+      ...Array.from({ length: 6 }, (_, i) =>
+        checkout(guest([{ variantId: m, quantity: 1 }], i)).then(() => "sold", () => "refused"),
+      ),
+      setStockLevels(tee.id, [{ variantId: m, stock: 4 }], staff.treasurer).then(() => "restocked", () => "refused"),
+    ]);
+    const sold = outcomes.filter((o) => o === "sold").length;
+    const left = (await sizes(tee)).M;
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect((await listOrders()).reduce((sum, o) => sum + o.quantity, 0)).toBe(sold);
+    expect(sold).toBeLessThanOrEqual(6); // never more orders than units that ever existed (2 + 4)
+    expect(outcomes).toContain("restocked");
+  });
+});
+
+describe("size labels", () => {
+  it("are normalised, so the same size cannot be added twice in another spelling", async () => {
+    expect(["xl", " XL ", "Xl", "2xl", "m", "32", "One size", "  one   size ", "Extra Large"].map(normaliseSizeLabel)).toEqual([
+      "XL", "XL", "XL", "2XL", "M", "32", "One size", "one size", "Extra Large",
+    ]);
+    const tee = await product({ variants: [{ size: "s", stock: 1 }, { size: "One size", stock: 1 }] });
+    expect(tee.variants.map((v) => v.size)).toEqual(["S", "One size"]);
+
+    const added = await addVariant(tee.id, variantInputSchema.parse({ size: " xxl ", stock: 6 }), staff.treasurer);
+    expect(added.variants.map((v) => [v.size, v.stock])).toEqual([["S", 1], ["One size", 1], ["XXL", 6]]);
+    for (const duplicate of ["XXL", "xxl", " Xxl ", "S", "one  SIZE"]) {
+      const error = await appError(() => addVariant(tee.id, { size: duplicate, stock: 1 }, staff.treasurer));
+      expect(error.fields?.size, duplicate).toBeTruthy();
+    }
+    expect((await getProduct(tee.id)).variants).toHaveLength(3);
+    expect(productInputSchema.safeParse({ name: "Dup", priceCents: 100, memberPriceCents: 100, variants: [{ size: "m", stock: 1 }, { size: " M ", stock: 1 }] }).success).toBe(false);
+  });
+
+  it("rejects a bad starting stock for a new size", async () => {
+    const tee = await product({ variants: [{ size: "M", stock: 1 }] });
+    for (const bad of [-1, 2.5, 100001]) {
+      expect((await appError(() => addVariant(tee.id, { size: "L", stock: bad }, staff.treasurer))).fields?.stock).toBeTruthy();
+      expect(variantInputSchema.safeParse({ size: "L", stock: bad }).success).toBe(false);
+    }
+    expect((await appError(() => addVariant(tee.id, { size: "   ", stock: 1 }, staff.treasurer))).fields?.size).toBeTruthy();
+    expect((await getProduct(tee.id)).variants).toHaveLength(1);
   });
 });
 
